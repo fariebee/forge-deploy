@@ -1,0 +1,108 @@
+{
+	# Admin API is bound to the pinned IP on the internal `caddy-admin` docker
+	# network (see docker-compose.yml) — NOT 0.0.0.0. Tenant app containers on
+	# pgforge-net share this Caddy container but have no route to 10.89.0.2,
+	# so they can't reach the admin API (previously 0.0.0.0:2019 was open to
+	# every container on pgforge-net; `origins` is only a Host-header check).
+	# The backend reaches it via CADDY_ADMIN_URL=http://10.89.0.2:2019.
+	admin 10.89.0.2:2019 {
+		origins caddy:2019 localhost:2019 127.0.0.1:2019 10.89.0.2:2019
+	}
+
+	# NOTE: every backend upstream below is `forge-edge:3000`, a network-scoped
+	# alias that exists ONLY on the pinned internal `caddy-proxy` network (see
+	# docker-compose.yml). That keeps user-facing proxy traffic off pgforge-net
+	# and makes Caddy's source address fall inside 10.90.0.0/24 — the only
+	# subnet the backend's TRUSTED_PROXY_CIDRS default trusts for
+	# X-Forwarded-For. Do not revert these to `app:3000`: a bare `app` lookup
+	# is ambiguous across the container's multiple networks.
+	on_demand_tls {
+		ask http://forge-edge:3000/api/tls-check
+	}
+
+	# Expose Caddy's own Prometheus metrics on the admin endpoint (:2019/metrics)
+	# so the monitoring profile's Prometheus can scrape them. No-op when nothing
+	# scrapes it; harmless when the monitoring profile is off.
+	metrics
+
+	# HTTP/3 broke long-lived SSE streams (studii lesson generation) — Chrome
+	# would cache the alt-svc header, upgrade subsequent fetches to QUIC, and
+	# the stream would die mid-flight with ERR_QUIC_PROTOCOL_ERROR. Pin to
+	# h1+h2 until Caddy's HTTP/3 + streaming-response handling stabilises.
+	servers {
+		protocols h1 h2
+		metrics
+	}
+}
+
+# Wildcard — all subdomains go to the Go server, which routes
+# to the correct container based on the Host header.
+*.{$DOMAIN} {
+	tls {
+		##DNS_BLOCK##
+	}
+	# Security headers for Forge's own dashboard/API surface (NOT the
+	# per-app generated Caddyfiles — those are emitted by the backend and
+	# out of scope here). Explicit per-host blocks below (s3./search./
+	# monitor./registry. and the apex) are more specific than this wildcard
+	# and don't inherit it, so this only hits *.{$DOMAIN} hosts.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+	}
+	reverse_proxy forge-edge:3000
+}
+
+# Custom domains — on-demand TLS via HTTP-01.
+:443 {
+	tls {
+		on_demand
+	}
+	reverse_proxy forge-edge:3000
+}
+
+s3.{$DOMAIN} {
+	# MinIO serves its Prometheus metrics unauthenticated
+	# (MINIO_PROMETHEUS_AUTH_TYPE=public) so in-network Prometheus can scrape
+	# minio:9000 directly. That surface must NOT be reachable through this
+	# public route — block it here.
+	@metrics path /minio/v2/metrics/*
+	respond @metrics 403
+	reverse_proxy minio:9000
+}
+
+search.{$DOMAIN} {
+	@unauthed not header Authorization "Bearer {$SEARXNG_API_KEY}"
+	respond @unauthed "Unauthorized" 401
+	reverse_proxy searxng:8080
+}
+
+# Grafana (monitoring profile). Single-label subdomain so the wildcard
+# DNS-01 cert covers it. Grafana enforces its own login. When the
+# monitoring profile is off the grafana upstream is absent and this host
+# returns 502 — a closed door, no Forge route reached.
+monitor.{$DOMAIN} {
+	reverse_proxy grafana:3000
+}
+
+registry.{$DOMAIN} {
+	forward_auth forge-edge:3000 {
+		uri /api/registry/auth
+	}
+	reverse_proxy registry:5000
+}
+
+{$DOMAIN} {
+	# Same security headers as the wildcard dashboard site (see above). The
+	# apex serves Forge's dashboard SPA (and the landing page to logged-out
+	# visitors) — it's Forge's own surface, so it gets the same hardening.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+	}
+	reverse_proxy forge-edge:3000
+}

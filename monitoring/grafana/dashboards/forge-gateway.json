@@ -1,0 +1,127 @@
+{
+  "uid": "forge-gateway",
+  "title": "Forge — LLM Gateway",
+  "tags": ["forge"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Requests/s",
+      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(forge_gateway_requests_total[5m]))", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Error ratio %",
+      "gridPos": { "h": 4, "w": 8, "x": 8, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "percent" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(forge_gateway_requests_total{status=\"error\"}[5m])) / clamp_min(sum(rate(forge_gateway_requests_total[5m])), 1) * 100", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Spend/hr (USD)",
+      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(forge_gateway_spend_decicents_total[5m])) * 0.001 * 3600", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Requests/s by model",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum by (model) (rate(forge_gateway_requests_total[5m]))", "legendFormat": "{{model}}", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Requests/s by provider",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum by (provider) (rate(forge_gateway_requests_total[5m]))", "legendFormat": "{{provider}}", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Tokens/s in vs out",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum by (direction) (rate(forge_gateway_tokens_total[5m]))", "legendFormat": "{{direction}}", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Spend rate USD/hr by model",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum by (model) (rate(forge_gateway_spend_decicents_total[5m])) * 0.001 * 3600", "legendFormat": "{{model}}", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Cumulative spend (USD, range)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum(increase(forge_gateway_spend_decicents_total[1h])) * 0.001", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Top apps by spend rate (USD/hr)",
+      "description": "Series label is the app-project UUID (forge_gateway_spend_decicents_total{app}).",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "topk(10, sum by (app) (rate(forge_gateway_spend_decicents_total[5m])) * 0.001 * 3600)", "legendFormat": "{{app}}", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Error rate by model",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum by (model) (rate(forge_gateway_requests_total{status=\"error\"}[5m]))", "legendFormat": "{{model}}", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ]
+    }
+  ]
+}

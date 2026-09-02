@@ -1,0 +1,70 @@
+// Grafana Alloy config for the Forge monitoring profile.
+// Single collector: discovers every container on the host, tails its logs,
+// relabels by Forge app/service, and ships to Loki. Alloy also serves its own
+// metrics on :12345 (scraped by Prometheus).
+
+logging {
+  level  = "info"
+  format = "logfmt"
+}
+
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock"
+}
+
+discovery.relabel "containers" {
+  targets = discovery.docker.containers.targets
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_label_forge_service"]
+    target_label  = "forge_service"
+  }
+  // Deployed apps are attributed by their compose project (pgforge-<app>),
+  // set automatically by `docker compose -p`. This is the per-app log key.
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+    target_label  = "compose_project"
+  }
+}
+
+loki.source.docker "containers" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.containers.output
+  forward_to = [loki.write.default.receiver]
+  labels     = { job = "docker" }
+}
+
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}
+
+// Traces: receive OTLP from the Forge backend and instrumented apps (gRPC 4317
+// / HTTP 4318) and forward to Tempo. Apps bind tracing.endpoint /
+// tracing.endpoint_http (-> alloy:4317 / alloy:4318) via the manifest.
+otelcol.receiver.otlp "default" {
+  grpc {
+    endpoint = "0.0.0.0:4317"
+  }
+  http {
+    endpoint = "0.0.0.0:4318"
+  }
+  output {
+    traces = [otelcol.exporter.otlp.tempo.input]
+  }
+}
+
+otelcol.exporter.otlp "tempo" {
+  client {
+    endpoint = "tempo:4317"
+    tls {
+      insecure = true
+    }
+  }
+}

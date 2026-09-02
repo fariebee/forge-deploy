@@ -1,0 +1,154 @@
+# Alert rules for the Forge monitoring profile.
+#
+# Only rules with REAL metrics live here. Three ticket topics have no
+# Prometheus-exposed signal in this stack yet and are NOT written as silent
+# no-op rules (a rule that never fires is worse than none — it fakes coverage):
+#
+#   - cert-issuance failure: Caddy exposes no certificate metrics (see
+#     caddyserver.com/docs/metrics) and Forge emits none. Real options:
+#     (a) a blackbox-exporter TLS probe of the public endpoints, or
+#     (b) a backend metric. Until then, issuance failures surface in Loki
+#     logs (`forge_service` label) and in the on-demand gate's
+#     /api/tls-check responses.
+#   - high scan-critical count: scanning results live in the DB and are only
+#     served via /api — the backend exposes no gauge for them. A backend
+#     metric (e.g. forge_scan_critical_total) is the fix.
+#   - backup failure: the backend emits no backup metric (only slog lines →
+#     Loki). The closest real Prometheus signal is host disk for
+#     /opt/pgforge/backups — a full disk is exactly how backups fail here —
+#     hence ForgeBackupDiskFull below. A backend forge_backup_* gauge is the
+#     proper long-term fix.
+
+groups:
+  - name: forge-infra
+    rules:
+      # ── Target / node down ────────────────────────────────────────────────
+      # Every scrape target (node-exporter, postgres/redis exporters, minio,
+      # caddy admin, alertmanager, forge-backend, tempo, alloy, …). When the
+      # monitoring profile is off none of these jobs have targets at all, so
+      # the rule is inert; when a target exists and dies, up goes to 0.
+      - alert: ForgeScrapeTargetDown
+        expr: up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Prometheus target {{ $labels.job }} ({{ $labels.instance }}) is down"
+
+      # ── High replication lag ──────────────────────────────────────────────
+      # postgres-exporter's pg_replication_lag_seconds only exists on
+      # cluster (HA) installs with a standby — no series, no alert otherwise.
+      - alert: ForgeReplicationLag
+        expr: pg_replication_lag_seconds > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Postgres replication lag on {{ $labels.server }} is {{ $value }}s"
+
+      # ── Container down ────────────────────────────────────────────────────
+      # cAdvisor (containerd factory) keys series by container ID, so a
+      # restarted container gets a fresh series — the stable signal is the
+      # container-namer's forge_container_info gauge, which tracks `docker ps`
+      # and drops the entry when a container is gone. absent() fires while a
+      # service's series is missing. `for: 3m` lets restart:unless-stopped
+      # recover a blip before alerting. tempo/rag/searxng/monitoring-minio-init
+      # are profile-gated and intentionally excluded (absent() would fire
+      # whenever their profile is off).
+      - alert: ForgeContainerDown
+        expr: absent(forge_container_info{compose_service="postgres"})
+        for: 3m
+        labels:
+          severity: warning
+          container: "postgres"
+        annotations: {summary: "Container postgres is not running"}
+      - alert: ForgeContainerDown
+        expr: absent(forge_container_info{compose_service="app"})
+        for: 3m
+        labels:
+          severity: warning
+          container: "app"
+        annotations: {summary: "Container app is not running"}
+      - alert: ForgeContainerDown
+        expr: absent(forge_container_info{compose_service="pgbouncer"})
+        for: 3m
+        labels:
+          severity: warning
+          container: "pgbouncer"
+        annotations: {summary: "Container pgbouncer is not running"}
+      - alert: ForgeContainerDown
+        expr: absent(forge_container_info{compose_service="redis"})
+        for: 3m
+        labels:
+          severity: warning
+          container: "redis"
+        annotations: {summary: "Container redis is not running"}
+      - alert: ForgeContainerDown
+        expr: absent(forge_container_info{compose_service="minio"})
+        for: 3m
+        labels:
+          severity: warning
+          container: "minio"
+        annotations: {summary: "Container minio is not running"}
+      - alert: ForgeContainerDown
+        expr: absent(forge_container_info{compose_service="registry"})
+        for: 3m
+        labels:
+          severity: warning
+          container: "registry"
+        annotations: {summary: "Container registry is not running"}
+      - alert: ForgeContainerDown
+        expr: absent(forge_container_info{compose_service="caddy"})
+        for: 3m
+        labels:
+          severity: warning
+          container: "caddy"
+        annotations: {summary: "Container caddy is not running"}
+      - alert: ForgeContainerDown
+        expr: absent(forge_container_info{compose_service="prometheus"})
+        for: 3m
+        labels:
+          severity: warning
+          container: "prometheus"
+        annotations: {summary: "Container prometheus is not running"}
+      - alert: ForgeContainerDown
+        expr: absent(forge_container_info{compose_service="grafana"})
+        for: 3m
+        labels:
+          severity: warning
+          container: "grafana"
+        annotations: {summary: "Container grafana is not running"}
+      - alert: ForgeContainerDown
+        expr: absent(forge_container_info{compose_service="loki"})
+        for: 3m
+        labels:
+          severity: warning
+          container: "loki"
+        annotations: {summary: "Container loki is not running"}
+      - alert: ForgeContainerDown
+        expr: absent(forge_container_info{compose_service="alloy"})
+        for: 3m
+        labels:
+          severity: warning
+          container: "alloy"
+        annotations: {summary: "Container alloy is not running"}
+      - alert: ForgeContainerDown
+        expr: absent(forge_container_info{compose_service="alertmanager"})
+        for: 3m
+        labels:
+          severity: warning
+          container: "alertmanager"
+        annotations: {summary: "Container alertmanager is not running"}
+
+      # ── Backup failure proxy ──────────────────────────────────────────────
+      # Backups pg_dump to /opt/pgforge/backups on the host; a full disk is
+      # the failure mode. This is a stand-in until the backend exposes a
+      # forge_backup_* metric (see file header). Mountpoint "/" assumes a
+      # single-root layout — adjust if backups live on a separate mount.
+      - alert: ForgeBackupDiskFull
+        expr: (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) * 100 < 10
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Host disk with /opt/pgforge/backups is {{ $value | humanizePercentage }} full — backups will fail"

@@ -1,0 +1,58 @@
+# Loki single-binary config for the Forge monitoring profile.
+# Chunks + index live in the MinIO that Forge already runs (bucket forge-logs).
+# Run with -config.expand-env=true so the MinIO creds and retention env vars
+# below expand from the container env (compose sets sensible defaults).
+# NOTE: expand-env treats every dollar-brace token as an env var, so this file
+# must not contain a literal one in a comment (it fails config parsing).
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: info
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: s3
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+storage_config:
+  tsdb_shipper:
+    active_index_directory: /loki/tsdb-index
+    cache_location: /loki/tsdb-cache
+  aws:
+    endpoint: minio:9000
+    bucketnames: forge-logs
+    access_key_id: ${MINIO_ROOT_USER}
+    secret_access_key: ${MINIO_ROOT_PASSWORD}
+    s3forcepathstyle: true
+    insecure: true
+
+limits_config:
+  retention_period: ${LOKI_RETENTION}
+  reject_old_samples: true
+  # Track retention so raising MONITORING_LOGS_RETENTION doesn't silently
+  # reject in-retention (backfilled / clock-skewed) logs at ingest.
+  reject_old_samples_max_age: ${LOKI_RETENTION}
+  max_query_series: 5000
+
+compactor:
+  working_directory: /loki/compactor
+  delete_request_store: s3
+  retention_enabled: true
+
+analytics:
+  reporting_enabled: false

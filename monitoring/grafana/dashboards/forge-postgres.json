@@ -1,0 +1,139 @@
+{
+  "uid": "forge-postgres",
+  "title": "Forge — PostgreSQL",
+  "tags": ["forge"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Postgres up",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "pg_up", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Active connections",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "sum(pg_stat_activity_count{state=\"active\"})", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "% of max connections",
+      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "percent" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum(pg_stat_database_numbackends) / sum(pg_settings_max_connections) * 100", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Connections by state",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum by (state) (pg_stat_activity_count)", "legendFormat": "{{state}}", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Transactions/s",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(pg_stat_database_xact_commit[5m]))", "legendFormat": "commit", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "refId": "B", "expr": "sum(rate(pg_stat_database_xact_rollback[5m]))", "legendFormat": "rollback", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Cache hit ratio %",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "percent" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(pg_stat_database_blks_hit[5m])) / (sum(rate(pg_stat_database_blks_hit[5m])) + sum(rate(pg_stat_database_blks_read[5m]))) * 100", "legendFormat": "cache hit %", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Tuple ops/s",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(pg_stat_database_tup_inserted[5m]))", "legendFormat": "inserted", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "refId": "B", "expr": "sum(rate(pg_stat_database_tup_updated[5m]))", "legendFormat": "updated", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "refId": "C", "expr": "sum(rate(pg_stat_database_tup_deleted[5m]))", "legendFormat": "deleted", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "refId": "D", "expr": "sum(rate(pg_stat_database_tup_fetched[5m]))", "legendFormat": "fetched", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Deadlocks/s",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(pg_stat_database_deadlocks[5m]))", "legendFormat": "deadlocks", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Database size",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "topk(10, pg_database_size_bytes{datname!~\"template.*\"})", "legendFormat": "{{datname}}", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Locks",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum by (mode) (pg_locks_count)", "legendFormat": "{{mode}}", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Replication lag (s)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "pg_replication_lag_seconds", "legendFormat": "lag", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ]
+    }
+  ]
+}

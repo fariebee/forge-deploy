@@ -1,0 +1,81 @@
+{
+  "uid": "forge-app",
+  "title": "Forge — App",
+  "tags": ["forge", "app"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 4,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "app",
+        "label": "App (compose project)",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": { "query": "label_values(forge_container_info{compose_project=~\"pgforge-.+\"}, compose_project)", "refId": "app" },
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": false
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "CPU (cores)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "none", "decimals": 2 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(container_cpu_usage_seconds_total{name=~\".+\"}[5m]) * on(name) group_left() label_replace(forge_container_info{compose_project=\"$app\"}, \"name\", \"$1\", \"id\", \"(.*)\"))", "legendFormat": "cpu", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Memory",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum(container_memory_usage_bytes{name=~\".+\"} * on(name) group_left() label_replace(forge_container_info{compose_project=\"$app\"}, \"name\", \"$1\", \"id\", \"(.*)\"))", "legendFormat": "mem", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Memory by container",
+      "description": "Per-container memory for this app. (cAdvisor runs under the containerd factory on this host, which does not expose per-container network counters — only host-level interface stats — so a network panel is intentionally omitted.)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "container_memory_usage_bytes{name=~\".+\"} * on(name) group_left(container) label_replace(forge_container_info{compose_project=\"$app\"}, \"name\", \"$1\", \"id\", \"(.*)\")", "legendFormat": "{{container}}", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Log volume",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        { "refId": "A", "expr": "sum(count_over_time({compose_project=\"$app\"}[5m]))", "legendFormat": "lines/5m", "datasource": { "type": "loki", "uid": "loki" } }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "logs",
+      "title": "Logs",
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 16 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending" },
+      "targets": [
+        { "refId": "A", "expr": "{compose_project=\"$app\"}", "datasource": { "type": "loki", "uid": "loki" } }
+      ]
+    }
+  ]
+}

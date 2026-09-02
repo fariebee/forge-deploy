@@ -1,0 +1,19 @@
+# Alertmanager config for the Forge monitoring profile.
+# Minimal: one route, one receiver. TODO below is the only thing an operator
+# must fill in for alerts to actually be delivered.
+route:
+  group_by: ['alertname', 'severity']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: 'ops-webhook'
+
+receivers:
+  - name: 'ops-webhook'
+    # TODO(operator): replace this placeholder with a real receiver — e.g.
+    # your webhook endpoint, Slack (via the Slack receiver), or email. The
+    # URL below points at nothing, so alerts are routed and logged here but
+    # not delivered anywhere until you change it.
+    webhook_configs:
+      - url: 'http://127.0.0.1:9099/placeholder-webhook'
+        send_resolved: true

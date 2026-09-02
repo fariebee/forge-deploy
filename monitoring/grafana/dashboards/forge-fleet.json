@@ -1,0 +1,102 @@
+{
+  "uid": "forge-fleet",
+  "title": "Forge — Fleet",
+  "tags": ["forge"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Containers running",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "count(count by (name) (container_last_seen{name=~\".+\"}))", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Forge-app containers",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "count(count by (compose_project) (forge_container_info{compose_project=~\"pgforge-.+\"}))", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "CPU cores by container (top 15)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "none", "decimals": 2 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "topk(15, rate(container_cpu_usage_seconds_total{name=~\".+\"}[5m]) * on(name) group_left(container) label_replace(forge_container_info, \"name\", \"$1\", \"id\", \"(.*)\"))", "legendFormat": "{{container}}", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Memory by container (top 15)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "topk(15, container_memory_usage_bytes{name=~\".+\"} * on(name) group_left(container) label_replace(forge_container_info, \"name\", \"$1\", \"id\", \"(.*)\"))", "legendFormat": "{{container}}", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Restarts (last range) by container",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "changes(container_start_time_seconds{name=~\".+\"}[$__range]) * on(name) group_left(container) label_replace(forge_container_info, \"name\", \"$1\", \"id\", \"(.*)\")", "legendFormat": "{{container}}", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "Container inventory",
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "forge_container_info", "instant": true, "format": "table", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "transformations": [
+        {
+          "id": "labelsToFields",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Value": true,
+              "__name__": true,
+              "id": true,
+              "instance": true,
+              "job": true
+            },
+            "indexByName": {
+              "container": 0,
+              "compose_project": 1,
+              "compose_service": 2
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

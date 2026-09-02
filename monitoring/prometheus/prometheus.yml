@@ -1,0 +1,98 @@
+# Prometheus scrape config for the Forge monitoring profile.
+# Targets are reachable by Docker service name on pgforge-net.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+# Alert rules (backup/storage, replication lag, target & container down).
+# See alerts.yml for what each rule needs and the known metric gaps.
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: node
+    static_configs:
+      - targets: ["node-exporter:9100"]
+        labels:
+          forge_service: host
+
+  - job_name: cadvisor
+    static_configs:
+      - targets: ["cadvisor:8080"]
+
+  - job_name: postgres
+    static_configs:
+      - targets: ["postgres-exporter:9187"]
+        labels:
+          forge_service: postgres
+
+  - job_name: redis
+    static_configs:
+      - targets: ["redis-exporter:9121"]
+        labels:
+          forge_service: redis
+
+  - job_name: minio
+    metrics_path: /minio/v2/metrics/cluster
+    static_configs:
+      - targets: ["minio:9000"]
+        labels:
+          forge_service: minio
+
+  - job_name: caddy
+    metrics_path: /metrics
+    # Caddy's admin /metrics listener is bound ONLY to 10.89.0.2:2019 on the
+    # internal caddy-admin network (see Caddyfile + docker-compose.yml). The
+    # `caddy` hostname would resolve to the pgforge-net IP, which the admin
+    # listener no longer answers on — pin the internal IP.
+    static_configs:
+      - targets: ["10.89.0.2:2019"]
+        labels:
+          forge_service: caddy
+
+  - job_name: alertmanager
+    static_configs:
+      - targets: ["alertmanager:9093"]
+        labels:
+          forge_service: alertmanager
+
+  # Forge backend's own OTel→Prometheus metrics (HTTP RED, gateway/RAG
+  # business metrics). Served on a dedicated internal listener (METRICS_ADDR,
+  # default :2113) on pgforge-net — never routed through Caddy.
+  - job_name: forge-backend
+    static_configs:
+      - targets: ["app:2113"]
+        labels:
+          forge_service: app
+
+  - job_name: tempo
+    static_configs:
+      - targets: ["tempo:3200"]
+        labels:
+          forge_service: tempo
+
+  - job_name: alloy
+    static_configs:
+      - targets: ["alloy:12345"]
+        labels:
+          forge_service: alloy
+
+  # Per-app resource metrics (CPU/mem) come from cAdvisor, which runs under the
+  # containerd factory on this host and therefore keys series by raw container
+  # ID with no compose labels. The container-namer sidecar emits a
+  # forge_container_info{id,container,compose_project,...} gauge (via
+  # node-exporter's textfile collector) that the per-app dashboard joins on the
+  # container ID to attribute metrics to pgforge-<app>. (Per-container network
+  # counters aren't exposed under the containerd factory — host-level interface
+  # stats only.) Scraping app-exposed custom /metrics is intentionally out of
+  # scope for now: it would need the deploy path to stamp a scrape label on app
+  # containers (a v1.1 follow-up), so there is no forge-apps docker_sd job here.

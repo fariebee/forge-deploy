@@ -1,0 +1,816 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg18
+    container_name: pgforge-postgres
+    restart: unless-stopped
+    labels:
+      forge_service: postgres
+    # Container hardening: no privilege escalation, drop all Linux caps and
+    # re-add only what the postgres image's entrypoint genuinely needs
+    # (chown/chmod of the data dir, gosu drop to the postgres user).
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?POSTGRES_SUPERUSER_PASSWORD must be set}
+      POSTGRES_DB: postgres
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    entrypoint: ["/init-ssl.sh"]
+    command: >
+      postgres
+      -c ssl=on
+      -c ssl_cert_file=/var/lib/postgresql/data/server.crt
+      -c ssl_key_file=/var/lib/postgresql/data/server.key
+      -c ssl_prefer_server_ciphers=on
+    ports:
+      # Direct PostgreSQL access (bypasses PgBouncer) — needed for pgvector
+      # Bound to localhost: only reachable from the host, not the internet.
+      # Apps on pgforge-net reach postgres:5432 via Docker networking.
+      - "${BIND_HOST:-127.0.0.1}:${PG_DIRECT_EXTERNAL_PORT:-5432}:5432"
+    volumes:
+      - pgforge_data:/var/lib/postgresql
+      - ./postgres-ssl:/etc/postgresql/ssl:ro
+      - ./postgres-ssl/init-ssl.sh:/init-ssl.sh:ro
+    networks:
+      - pgforge-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    # Forge's own image: CI pushes :latest on every main merge and `task
+    # deploy` pulls it. Do NOT pin this — pinning breaks auto-deploy. See
+    # docs/runbooks/platform-images.md.
+    image: ghcr.io/fariebee/forge:latest
+    container_name: pgforge-app
+    restart: unless-stopped
+    labels:
+      forge_service: app
+    # no-new-privileges is safe here: the backend never execs setuid binaries
+    # (docker CLI talks to the mounted socket directly), so it can't break
+    # docker.sock access.
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      # Bound to localhost: Caddy reverse-proxies to app:3000 via Docker networking.
+      - "${BIND_HOST:-127.0.0.1}:${APP_EXTERNAL_PORT:-3001}:3000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Bind-mount (not named volume) so user-app composes can use relative
+      # bind mounts like `./config.yml:/etc/foo`. The Docker daemon resolves
+      # those against the host path, which must equal the in-container path
+      # `/opt/pgforge/apps`. APPS_HOST_PATH lets installs override the host
+      # location (e.g. an attached data volume) but the in-container path is
+      # fixed.
+      - ${APPS_HOST_PATH:-/opt/pgforge/apps}:/opt/pgforge/apps
+      # Legacy named volume mounted at /opt/pgforge/apps-legacy. On first
+      # boot the entrypoint rsyncs its contents into the bind-mount path,
+      # preserving data from pre-bind-mount installs. Safe to remove after
+      # all known prod servers have completed the migration.
+      - pgforge_apps:/opt/pgforge/apps-legacy
+      - pgforge_backups:/opt/pgforge/backups
+      - pgforge_kratos:/opt/pgforge/kratos
+      - pgforge_hydra:/opt/pgforge/hydra
+      - sites:/data/sites
+    group_add:
+      - "${DOCKER_GID:-999}"
+    environment:
+      MASTER_PG_URL: postgresql://postgres:${POSTGRES_SUPERUSER_PASSWORD:?POSTGRES_SUPERUSER_PASSWORD must be set}@postgres:5432/postgres
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set}
+      # No colon inside the :? message — compose v5.1.x fails parse on it.
+      SECRETS_KEY: ${SECRETS_KEY:?SECRETS_KEY must be set (64 hex chars, openssl rand -hex 32)}
+      FORGE_APP_DB_PASSWORD: ${FORGE_APP_DB_PASSWORD:-}
+      # Egress SSRF boundary. Programs host iptables/DOCKER-USER, so it only
+      # works on Linux hosts; set false for Docker Desktop (macOS/Windows).
+      EGRESS_POLICY_ENABLED: ${EGRESS_POLICY_ENABLED:-true}
+      EGRESS_ALLOW_CIDRS: ${EGRESS_ALLOW_CIDRS:-}
+      EGRESS_RECONCILE_INTERVAL: ${EGRESS_RECONCILE_INTERVAL:-30s}
+      # Dial-level counterpart, for connections the server process makes
+      # itself (git clone/fetch, webhook delivery) and never traverse
+      # DOCKER-USER. Without this line the .env setting never reaches the
+      # process and private git remotes have no escape hatch.
+      NETGUARD_ALLOW_CIDRS: ${NETGUARD_ALLOW_CIDRS:-}
+      # Optional: pin a provisioned Kratos instance to back Forge's own login.
+      FORGE_AUTH_KRATOS_ID: ${FORGE_AUTH_KRATOS_ID:-}
+      FORGE_AUTH_ADMIN_EMAIL: ${FORGE_AUTH_ADMIN_EMAIL:-admin@localhost}
+      PUBLIC_PG_HOST: ${PUBLIC_PG_HOST:-${DOMAIN:-localhost}}
+      PUBLIC_PG_PORT: ${PUBLIC_PG_PORT:-6432}
+      PUBLIC_PG_DIRECT_PORT: ${PUBLIC_PG_DIRECT_PORT:-${PG_DIRECT_EXTERNAL_PORT:-5432}}
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379/0
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      PUBLIC_REDIS_HOST: ${PUBLIC_REDIS_HOST:-${DOMAIN:-localhost}}
+      PUBLIC_REDIS_PORT: ${PUBLIC_REDIS_PORT:-6379}
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:?MINIO_ROOT_USER must be set}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be set}
+      PUBLIC_MINIO_HOST: ${PUBLIC_MINIO_HOST:-s3.${DOMAIN:-localhost}}
+      # Caddy admin API. The admin listener is bound ONLY to 10.89.0.2 on the
+      # internal `caddy-admin` network (see Caddyfile) — a plain IP, not the
+      # `caddy` hostname: Docker DNS returns just one address for a container
+      # on multiple networks (the pgforge-net one), which the admin listener
+      # no longer answers on. Pinning the internal IP keeps this deterministic.
+      CADDY_ADMIN_URL: http://10.89.0.2:2019
+      APPS_BASE_PATH: /opt/pgforge/apps
+      BACKUPS_BASE_PATH: /opt/pgforge/backups
+      PGFORGE_NETWORK: pgforge-net
+      # X-Forwarded-For is honored ONLY from the pinned `caddy-proxy` edge
+      # subnet (10.90.0.0/24) — the dedicated, internal-only network Caddy
+      # uses to reach the backend for user-facing traffic. Tenant containers
+      # on pgforge-net are not trusted: their forged XFF is ignored and they
+      # are rate-limited by their real container address. Override only if
+      # you also re-pin the caddy-proxy ipam subnet below.
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-}
+      EXPOSED_PORT_RANGE: ${EXPOSED_PORT_RANGE:-20000-20999}
+      DOMAIN: ${DOMAIN:-localhost}
+      REGISTRY_URL: registry.${DOMAIN:-localhost}
+      FORGE_REGISTRY_AUTH_KEY: ${FORGE_REGISTRY_AUTH_KEY:-}
+      # GenAI (optional; feature hidden when GENAI_API_KEY is unset)
+      GENAI_BASE_URL: ${GENAI_BASE_URL:-}
+      GENAI_API_KEY: ${GENAI_API_KEY:-}
+      GENAI_MODEL: ${GENAI_MODEL:-}
+      # SearxNG (active when COMPOSE_PROFILES includes "searxng")
+      SEARXNG_API_KEY: ${SEARXNG_API_KEY:-}
+      # RAG (active when COMPOSE_PROFILES includes "rag")
+      RAG_PG_URL: ${RAG_PG_URL:-}
+      RAG_NOTIFY_SECRET: ${RAG_NOTIFY_SECRET:-}
+      RAG_GATEWAY_TOKEN: ${RAG_GATEWAY_TOKEN:-}
+      RAG_WORKER_CONCURRENCY: ${RAG_WORKER_CONCURRENCY:-2}
+      RAG_MAX_PDF_BYTES: ${RAG_MAX_PDF_BYTES:-104857600}
+      # Optional URL overrides. PUBLIC_BASE_URL is what rag.<name>.url
+      # resolves to in app env vars; GATEWAY_BASE_URL is the embedder
+      # target. Both default to sensible in-network values, but operators
+      # need to override when DOMAIN points at an external Forge install
+      # or the gateway lives behind a different hostname.
+      RAG_PUBLIC_BASE_URL: ${RAG_PUBLIC_BASE_URL:-}
+      RAG_GATEWAY_BASE_URL: ${RAG_GATEWAY_BASE_URL:-}
+      # Pass COMPOSE_PROFILES through so ragProfileEnabled() in the
+      # backend can read it and decide whether to retry the startup ping.
+      COMPOSE_PROFILES: ${COMPOSE_PROFILES:-}
+      # Public Grafana URL for the monitoring profile. Empty hides the
+      # dashboard's Monitoring nav item and per-app deep links.
+      MONITORING_URL: ${MONITORING_URL:-}
+      # OTLP trace export target. Empty by default (tracing off, zero overhead).
+      # Set to http://alloy:4318 in .env to ship Forge-backend traces to Tempo
+      # via Alloy when the monitoring profile is on.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      # DNS provider config for wildcard-cert issuance and DDNS. SeedFromEnv
+      # reads these on first boot to populate the dns_config table.
+      DNS_PROVIDER: ${DNS_PROVIDER:-godaddy}
+      GODADDY_API_TOKEN: ${GODADDY_API_TOKEN:-}
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:-}
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      pgforge-net:
+      # Internal-only admin network, shared with caddy (see caddy service).
+      # The backend reaches Caddy's admin API on 10.89.0.2:2019.
+      caddy-admin:
+        # Pinned so auto-assignment never collides with caddy's static .2.
+        ipv4_address: 10.89.0.3
+      # Pinned edge network for the Caddy→backend USER-facing proxy path.
+      # The `forge-edge` alias exists ONLY on this network, so a DNS lookup
+      # from Caddy deterministically resolves to this leg's address (a bare
+      # `app` lookup is ambiguous across multiple networks). Caddy's source
+      # address on this leg is what TRUSTED_PROXY_CIDRS trusts.
+      caddy-proxy:
+        aliases:
+          - forge-edge
+
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.25.1-p0
+    container_name: pgforge-pgbouncer
+    restart: unless-stopped
+    labels:
+      forge_service: pgbouncer
+    # Runs as the image's unprivileged postgres user; no caps needed.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    ports:
+      # PgBouncer connection pooling.
+      # Bound to localhost: only reachable from the host, not the internet.
+      # Apps on pgforge-net reach pgbouncer:6432 via Docker networking.
+      - "${BIND_HOST:-127.0.0.1}:${PG_EXTERNAL_PORT:-6432}:6432"
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?POSTGRES_SUPERUSER_PASSWORD must be set}
+    volumes:
+      - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./pgbouncer/pg_hba.conf:/etc/pgbouncer/pg_hba.conf:ro
+      - ./pgbouncer/entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: /entrypoint.sh
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - pgforge-net
+
+  redis:
+    image: redis:8-alpine
+    container_name: pgforge-redis
+    restart: unless-stopped
+    labels:
+      forge_service: redis
+    # Entrypoint runs as root then gosu-drops to the redis user: needs
+    # SETUID/SETGID for gosu and CHOWN for /data perms. Nothing else.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    # This instance backs BullMQ queues for tenant apps, not just caches, and
+    # the two want opposite eviction policies. An LRU policy is right for a
+    # cache and silently destructive for a queue: BullMQ job hashes carry no
+    # TTL, so under memory pressure `allkeys-lru` evicts queued *work*. A
+    # measured example — a Buzzz campaign job hash is ~1.4KB with no TTL, so
+    # 50k recipients is ~70MB of job data plus the events stream, against a
+    # 256mb ceiling. An evicted job is a recipient who is never sent and never
+    # errors, which is invisible until someone counts.
+    #
+    # `noeviction` makes the failure loud instead: writes are refused once the
+    # ceiling is hit. That is the correct trade for a queue — a rejected enqueue
+    # surfaces immediately, a dropped job does not — but it does mean a
+    # cache-only consumer sharing this instance sees write errors rather than
+    # silent eviction, so raise REDIS_MAXMEMORY rather than relaxing the policy.
+    command: redis-server --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD must be set} --maxmemory ${REDIS_MAXMEMORY:-1gb} --maxmemory-policy ${REDIS_MAXMEMORY_POLICY:-noeviction}
+    ports:
+      # Bound to localhost: only reachable from the host, not the internet.
+      # Apps on pgforge-net reach redis:6379 via Docker networking.
+      - "${BIND_HOST:-127.0.0.1}:${REDIS_EXTERNAL_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - pgforge-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    container_name: pgforge-minio
+    restart: unless-stopped
+    labels:
+      forge_service: minio
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER must be set}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be set}
+      # Allow unauthenticated Prometheus scraping of the cluster metrics
+      # endpoint (used by the monitoring profile). Harmless when monitoring is
+      # off — the endpoint is only reachable on pgforge-net.
+      MINIO_PROMETHEUS_AUTH_TYPE: public
+      # Webhook target used by RAG bucket notifications. Empty endpoint disables
+      # the target gracefully — MinIO ignores it. Active when COMPOSE_PROFILES
+      # includes "rag" and RAG_NOTIFY_SECRET is set.
+      MINIO_NOTIFY_WEBHOOK_ENABLE_rag: "on"
+      MINIO_NOTIFY_WEBHOOK_ENDPOINT_rag: ${RAG_NOTIFY_WEBHOOK_ENDPOINT:-http://app:3000/internal/rag/notify}
+      # MinIO sends this value verbatim as the Authorization header value.
+      # Our /internal/rag/notify handler expects the standard "Bearer <token>"
+      # form, so the prefix has to be baked in here. Without it MinIO sends
+      # just the raw secret and the handler rejects every notification with
+      # 401, so the bucket-event pipeline never enqueues a job.
+      MINIO_NOTIFY_WEBHOOK_AUTH_TOKEN_rag: Bearer ${RAG_NOTIFY_SECRET:-}
+    volumes:
+      - minio_data:/data
+    networks:
+      - pgforge-net
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  registry:
+    image: registry:2
+    container_name: pgforge-registry
+    restart: unless-stopped
+    labels:
+      forge_service: registry
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    environment:
+      REGISTRY_STORAGE_DELETE_ENABLED: "true"
+    volumes:
+      - registry_data:/var/lib/registry
+    networks:
+      - pgforge-net
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5000/v2/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  caddy:
+    build:
+      context: ./caddy
+    container_name: pgforge-caddy
+    restart: unless-stopped
+    labels:
+      forge_service: caddy
+    # Runs as root (official image) and binds 80/443: NET_BIND_SERVICE is
+    # genuinely needed; CHOWN/DAC_OVERRIDE/FOWNER cover cert/config file
+    # management in the caddy_data/config/sites volumes.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - NET_BIND_SERVICE
+      - SETGID
+      - SETUID
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      - DNS_PROVIDER=${DNS_PROVIDER:-godaddy}
+      - DOMAIN=${DOMAIN:-localhost}
+      - GODADDY_API_TOKEN=${GODADDY_API_TOKEN:-}
+      - CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN:-}
+      - SEARXNG_API_KEY=${SEARXNG_API_KEY:-}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+      # Static-mode apps build into the `sites` volume at /data/sites/<app>/current
+      # (see backend/internal/service/apps/build_static.go). Caddy file_server routes
+      # serve that path, so it must mount the same volume the backend writes to.
+      - sites:/data/sites
+    depends_on:
+      - app
+    networks:
+      pgforge-net:
+      # Internal-only admin network: the backend (app) and monitoring
+      # prometheus join it to reach the Caddy admin API; tenant app containers
+      # are never attached, so they have no route to the admin listener.
+      caddy-admin:
+        ipv4_address: 10.89.0.2
+      # Pinned edge network for user-facing traffic to the backend. Tenant
+      # containers are never attached, so the backend's TRUSTED_PROXY_CIDRS
+      # default (10.90.0.0/24) trusts only Caddy's source address here.
+      caddy-proxy:
+
+  forge-rag-pg:
+    image: pgvector/pgvector:pg16
+    container_name: pgforge-rag-pg
+    restart: unless-stopped
+    profiles: ["rag"]
+    # RAG_PG_PASSWORD uses :- (not :?) so compose validation succeeds for
+    # installs that don't enable the profile — `:?` fails parse-time on
+    # every install regardless of which profiles are active. When the
+    # profile IS active and the password is empty, Postgres refuses to
+    # start (POSTGRES_PASSWORD empty fails the initdb step with a clear
+    # "you must specify POSTGRES_PASSWORD…" message). Empty string never
+    # reaches a working database.
+    environment:
+      POSTGRES_USER: forge
+      POSTGRES_PASSWORD: ${RAG_PG_PASSWORD:-}
+      POSTGRES_DB: rag
+    volumes:
+      - rag_pg_data:/var/lib/postgresql/data
+    networks:
+      - pgforge-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U forge -d rag"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  searxng:
+    image: searxng/searxng:2026.8.20-487d7a96e
+    container_name: pgforge-searxng
+    restart: unless-stopped
+    profiles: ["searxng"]
+    # SEARXNG_SECRET_KEY uses :- (not :?) so compose validation succeeds for
+    # installs that don't enable the profile. When the profile IS active and
+    # the secret is empty, the fallback resolves to "ultrasecretkey" — the
+    # documented placeholder SearxNG's startup code refuses to accept
+    # (webapp.py exits with sys.exit(1) and a clear "server.secret_key is
+    # not changed" log line). Empty string would silently pass that check
+    # and leave HMAC signing keyed on "".
+    environment:
+      SEARXNG_SECRET: ${SEARXNG_SECRET_KEY:-ultrasecretkey}
+      SEARXNG_BASE_URL: https://search.${DOMAIN:-localhost}/
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+      - searxng_data:/var/cache/searxng
+    networks:
+      - pgforge-net
+
+  # ── Monitoring (opt-in: COMPOSE_PROFILES=monitoring) ──────────────────────
+  # Lean observability core — Grafana + Prometheus + Loki + Grafana Alloy plus
+  # exporters. Logs + metrics for both Forge and the apps it deploys. Grafana is
+  # fronted by Caddy on monitor.{DOMAIN}. See
+  # docs/superpowers/specs/2026-05-29-monitoring-lgtm-design.md
+  #
+  # Tracing (Tempo) is a SEPARATE opt-in profile: `monitoring` brings up
+  # logs + metrics; add `tracing` (COMPOSE_PROFILES=monitoring,tracing) to also
+  # run Tempo. It's the heaviest single piece (~360 MiB), so small installs
+  # keep it off.
+
+  # One-shot: create the Loki bucket in MinIO (Loki does not auto-create it).
+  monitoring-minio-init:
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
+    container_name: pgforge-monitoring-init
+    profiles: ["monitoring"]
+    restart: "no"
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD} &&
+      mc mb --ignore-existing local/forge-logs
+      "
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER must be set}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be set}
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - pgforge-net
+
+  loki:
+    image: grafana/loki:3.3.2
+    container_name: pgforge-loki
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    command: -config.file=/etc/loki/loki-config.yml -config.expand-env=true
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER must be set}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be set}
+      LOKI_RETENTION: ${MONITORING_LOGS_RETENTION:-336h}
+    volumes:
+      - ./monitoring/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki_data:/loki
+    depends_on:
+      monitoring-minio-init:
+        condition: service_completed_successfully
+    networks:
+      - pgforge-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:3100/ready | grep -q ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  tempo:
+    image: grafana/tempo:2.7.1
+    container_name: pgforge-tempo
+    # Tracing is a SEPARATE opt-in profile. Tempo is the heaviest observability
+    # component (~360 MiB) and the least-used on small boxes, so `monitoring`
+    # alone no longer starts it — enable with COMPOSE_PROFILES=monitoring,tracing.
+    # Nothing depends_on Tempo; Alloy's OTLP exporter and Grafana's Tempo
+    # datasource tolerate its absence (they just have nowhere to send/query
+    # traces until the profile is on).
+    profiles: ["tracing"]
+    restart: unless-stopped
+    command: ["-config.file=/etc/tempo/tempo.yml", "-config.expand-env=true"]
+    environment:
+      MONITORING_TRACES_RETENTION: ${MONITORING_TRACES_RETENTION:-72h}
+    volumes:
+      - ./monitoring/tempo/tempo.yml:/etc/tempo/tempo.yml:ro
+      - tempo_data:/var/tempo
+    networks:
+      - pgforge-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:3200/ready | grep -q ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  alloy:
+    image: grafana/alloy:v1.5.1
+    container_name: pgforge-alloy
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    command:
+      - run
+      - /etc/alloy/config.alloy
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+    volumes:
+      - ./monitoring/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy_data:/var/lib/alloy/data
+    depends_on:
+      - loki
+    networks:
+      - pgforge-net
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: pgforge-prometheus
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${MONITORING_METRICS_RETENTION:-15d}
+      - --web.enable-lifecycle
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      pgforge-net:
+      # Joins the internal caddy-admin network so it can scrape the Caddy
+      # admin /metrics endpoint (pinned at 10.89.0.2:2019 in prometheus.yml).
+      caddy-admin:
+        # Pinned so auto-assignment never collides with caddy's static .2.
+        ipv4_address: 10.89.0.4
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    container_name: pgforge-alertmanager
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+    volumes:
+      - ./monitoring/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    networks:
+      - pgforge-net
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: pgforge-grafana
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    # Defaults the Grafana admin password to the Forge ADMIN_PASSWORD (already
+    # required on every install) so the monitoring profile needs no extra
+    # secret — set GRAFANA_ADMIN_PASSWORD only to give Grafana its own. A
+    # repo-committed sentinel would be a publicly-known credential and an empty
+    # value makes Grafana fall back to its own built-in admin/admin, so the
+    # entrypoint still hard-fails if both are somehow unset, then execs
+    # Grafana's normal /run.sh. (We can't use the compose `:?` fail-fast form:
+    # this file is interpolated even when the monitoring profile is off, which
+    # would break every non-monitoring install — same reason RAG/SearxNG use
+    # `:-` defaults.)
+    entrypoint:
+      - sh
+      - -c
+      - 'if [ -z "$$GF_SECURITY_ADMIN_PASSWORD" ]; then echo "FATAL: set ADMIN_PASSWORD (or GRAFANA_ADMIN_PASSWORD) in .env to enable the monitoring profile" >&2; exit 1; fi; exec /run.sh'
+    ports:
+      # Bound to localhost: Caddy reverse-proxies to grafana:3000 on monitor.{DOMAIN}.
+      - "${BIND_HOST:-127.0.0.1}:${GRAFANA_EXTERNAL_PORT:-3002}:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      # Falls back to the Forge ADMIN_PASSWORD when GRAFANA_ADMIN_PASSWORD is
+      # unset. If both are empty the entrypoint above refuses to start, so a
+      # forgotten env var can never leave a known-credential admin exposed.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-${ADMIN_PASSWORD:-}}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_SERVER_ROOT_URL: https://monitor.${DOMAIN:-localhost}/
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+      - loki
+    networks:
+      - pgforge-net
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.52.1
+    container_name: pgforge-cadvisor
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    # This host runs Docker with the containerd image-store snapshotter, so the
+    # legacy Docker factory can't resolve container layers (it looks for
+    # image/overlayfs/layerdb/mounts/<id>/mount-id, which the snapshotter never
+    # creates) and emits zero per-container series. Point cAdvisor at
+    # containerd's socket and Docker's "moby" namespace instead — that's what
+    # actually backs the running containers. We deliberately DON'T mount the
+    # Docker socket (/var/run) or /var/lib/docker: both only feed the Docker
+    # factory, and if it registers it races the containerd factory to claim the
+    # docker-<id>.scope cgroups and then fails the layer lookup. Denying it the
+    # socket makes the containerd factory the sole, deterministic handler.
+    # Series are keyed by container ID (the `name` label); the container-namer
+    # sidecar maps those to friendly names via node-exporter's textfile collector.
+    command:
+      - --containerd=/run/containerd/containerd.sock
+      - --containerd-namespace=moby
+      - --housekeeping_interval=15s
+    # cgroup v2 host: cAdvisor must join the host cgroup namespace, otherwise it
+    # sees its own scope as the cgroup root (`0::/`) and can't line the host's
+    # docker-<id>.scope cgroups up with containers — yielding zero per-container
+    # series even though the containerd factory registers fine.
+    cgroup: host
+    volumes:
+      - /:/rootfs:ro,rslave
+      - /sys:/sys:ro
+      - /dev/disk/:/dev/disk:ro
+      - /run/containerd/containerd.sock:/run/containerd/containerd.sock:ro
+    devices:
+      - /dev/kmsg
+    privileged: true
+    networks:
+      - pgforge-net
+
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    container_name: pgforge-node-exporter
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    command:
+      - --path.rootfs=/host
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+      - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)
+      - --collector.textfile.directory=/textfile
+    volumes:
+      - /:/host:ro,rslave
+      - container_names:/textfile:ro
+    networks:
+      - pgforge-net
+
+  # Maps cAdvisor's container-ID-keyed series to friendly names. cAdvisor under
+  # the containerd factory labels each series with `name=<container-id>` and no
+  # compose labels, so this sidecar polls the Docker API and emits a
+  # forge_container_info{id,container,compose_project,compose_service} gauge that
+  # dashboards join on (joining cAdvisor's `name` to this `id`). Written
+  # atomically (.prom.tmp -> mv) so node-exporter never scrapes a half-written
+  # file; and only rewritten on a successful `docker ps`, so a transient daemon
+  # hiccup keeps serving the last good mapping instead of blanking the panels.
+  container-namer:
+    image: docker:27-cli
+    container_name: pgforge-container-namer
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        while true; do
+          if snapshot=$$(docker ps --no-trunc \
+              --format '{{.ID}}|{{.Names}}|{{.Label "com.docker.compose.project"}}|{{.Label "com.docker.compose.service"}}' 2>/dev/null); then
+            {
+              echo '# HELP forge_container_info Container ID to name/compose mapping.'
+              echo '# TYPE forge_container_info gauge'
+              printf '%s\n' "$$snapshot" | while IFS='|' read -r id container project service; do
+                [ -z "$$id" ] && continue
+                printf 'forge_container_info{id="%s",container="%s",compose_project="%s",compose_service="%s"} 1\n' \
+                  "$$id" "$$container" "$$project" "$$service"
+              done
+            } > /textfile/forge_container_info.prom.tmp \
+              && mv /textfile/forge_container_info.prom.tmp /textfile/forge_container_info.prom
+          fi
+          sleep 15
+        done
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - container_names:/textfile
+    networks:
+      - pgforge-net
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.18.1
+    container_name: pgforge-postgres-exporter
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    environment:
+      DATA_SOURCE_NAME: postgresql://postgres:${POSTGRES_SUPERUSER_PASSWORD:?POSTGRES_SUPERUSER_PASSWORD must be set}@postgres:5432/postgres?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - pgforge-net
+
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.66.0
+    container_name: pgforge-redis-exporter
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    environment:
+      REDIS_ADDR: redis://redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - pgforge-net
+
+networks:
+  pgforge-net:
+    driver: bridge
+  # Internal-only bridge for the Caddy admin API. `internal: true` (no egress)
+  # and only app + prometheus attach to it — tenant app containers on
+  # pgforge-net can't route to it. Caddy's admin listener binds the pinned
+  # 10.89.0.2; keep the subnet in sync with the Caddyfile and CADDY_ADMIN_URL.
+  caddy-admin:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.89.0.0/24
+  # Dedicated, pinned edge network carrying ONLY the Caddy→backend user-facing
+  # proxy path. Pinned subnet so the backend can default TRUSTED_PROXY_CIDRS
+  # to exactly this range: tenant containers live on pgforge-net and per-app
+  # bridges (outside this range), so they cannot forge X-Forwarded-For to
+  # bypass the auth/ingress rate limiters. `internal: true` — no egress is
+  # needed on this leg. Keep the subnet in sync with the backend's
+  # TRUSTED_PROXY_CIDRS default (config.go) if you change it.
+  caddy-proxy:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.90.0.0/24
+
+volumes:
+  pgforge_data:
+    driver: local
+  caddy_data:
+    driver: local
+  caddy_config:
+    driver: local
+  redis_data:
+    driver: local
+  minio_data:
+    driver: local
+  pgforge_apps:
+    driver: local
+  pgforge_backups:
+    driver: local
+  pgforge_kratos:
+    driver: local
+  pgforge_hydra:
+    driver: local
+  registry_data:
+    driver: local
+  sites:
+    driver: local
+  searxng_data:
+    driver: local
+  rag_pg_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+  loki_data:
+    driver: local
+  alloy_data:
+    driver: local
+  container_names:
+    driver: local
+  tempo_data:
+    driver: local

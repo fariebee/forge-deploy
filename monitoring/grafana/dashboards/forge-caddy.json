@@ -1,0 +1,116 @@
+{
+  "uid": "forge-caddy",
+  "title": "Forge — Caddy (edge)",
+  "tags": ["forge"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "About this dashboard",
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 0 },
+      "options": {
+        "mode": "markdown",
+        "content": "Edge / reverse-proxy view of Caddy: request rate, status mix, latency, upstream health. **Per-host breakdown is not available** — Caddy drops host labels and Forge serves all apps through a single wildcard vhost, so everything here is install-wide totals. For per-app HTTP metrics, see the **Forge API** dashboard."
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Requests/s",
+      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(caddy_http_requests_total[5m]))", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "In flight",
+      "gridPos": { "h": 4, "w": 8, "x": 8, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum(caddy_http_requests_in_flight)", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "5xx ratio %",
+      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "percent" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "(sum(rate(caddy_http_request_duration_seconds_count{code=~\"5..\"}[5m])) or vector(0)) / clamp_min(sum(rate(caddy_http_request_duration_seconds_count[5m])), 1) * 100", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Requests/s by status class",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum by (code) (rate(caddy_http_request_duration_seconds_count[5m]))", "legendFormat": "{{code}}", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Latency percentiles",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.50, sum(rate(caddy_http_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p50", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "refId": "B", "expr": "histogram_quantile(0.95, sum(rate(caddy_http_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p95", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "refId": "C", "expr": "histogram_quantile(0.99, sum(rate(caddy_http_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p99", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Requests/s by handler",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum by (handler) (rate(caddy_http_requests_total[5m]))", "legendFormat": "{{handler}}", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Requests/s by method",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum by (method) (rate(caddy_http_request_duration_seconds_count[5m]))", "legendFormat": "{{method}}", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Upstream health",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "none", "min": 0, "max": 1 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "caddy_reverse_proxy_upstreams_healthy", "legendFormat": "{{upstream}}", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ]
+    }
+  ]
+}

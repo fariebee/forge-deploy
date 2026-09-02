@@ -1,0 +1,21 @@
+# SearxNG runtime config for the Forge-bundled instance.
+# Bind-mounted read-only into /etc/searxng/settings.yml.
+#
+# Auth is NOT done here — Caddy is the bearer-token boundary. server.limiter
+# stays off because the only client SearxNG ever sees is Caddy, so its IP-based
+# rate-limit would falsely punish every legitimate caller.
+
+use_default_settings: true
+
+general:
+  instance_name: "Forge SearxNG"
+
+search:
+  formats:
+    - html
+    - json
+
+server:
+  secret_key: !env SEARXNG_SECRET
+  limiter: false
+  image_proxy: true
