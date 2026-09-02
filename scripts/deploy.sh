@@ -183,7 +183,10 @@ clone_repo() {
         return
     fi
     info "Cloning Forge repository..."
-    git clone "$REPO_URL" "$INSTALL_DIR"
+    # Ubuntu 24.04 ships libcurl 8.5, whose HTTP/2 handling makes anonymous
+    # clones from github.com fail intermittently with "could not read Username"
+    # (401 on the upload-pack POST). HTTP/1.1 is reliable.
+    git -c http.version=HTTP/1.1 clone "$REPO_URL" "$INSTALL_DIR"
     info "Repository cloned"
 }
 
