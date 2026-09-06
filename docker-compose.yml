@@ -24,12 +24,19 @@ services:
       POSTGRES_DB: postgres
       POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
     entrypoint: ["/init-ssl.sh"]
+    # tcp_keepalives_*: reap dead client sessions (and their advisory locks)
+    # in ~1 min instead of the kernel's ~2h; the server also applies these via
+    # ALTER SYSTEM at boot. Adding a flag here recreates the container on the
+    # next deploy (brief Postgres outage).
     command: >
       postgres
       -c ssl=on
       -c ssl_cert_file=/var/lib/postgresql/data/server.crt
       -c ssl_key_file=/var/lib/postgresql/data/server.key
       -c ssl_prefer_server_ciphers=on
+      -c tcp_keepalives_idle=60
+      -c tcp_keepalives_interval=10
+      -c tcp_keepalives_count=3
     ports:
       # Direct PostgreSQL access (bypasses PgBouncer) — needed for pgvector
       # Bound to localhost: only reachable from the host, not the internet.
