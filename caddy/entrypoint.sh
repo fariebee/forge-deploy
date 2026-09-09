@@ -16,7 +16,10 @@ else
     TLS_BLOCK="on_demand"
 fi
 
-sed "s|##DNS_BLOCK##|$TLS_BLOCK|" /etc/caddy/Caddyfile > /tmp/Caddyfile
+# The token lands in a sed replacement: escape its metacharacters (&, |, \)
+# so a token containing one can't corrupt the rendered Caddyfile.
+TLS_BLOCK_ESC=$(printf '%s' "$TLS_BLOCK" | sed 's/[\\&|]/\\&/g')
+sed "s|##DNS_BLOCK##|$TLS_BLOCK_ESC|" /etc/caddy/Caddyfile > /tmp/Caddyfile
 
 if [ "$TLS_BLOCK" = "on_demand" ]; then
     # No DNS token path. The Caddyfile's explicit single-label subdomain blocks
