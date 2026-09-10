@@ -94,7 +94,7 @@ generate_and_write_env() {
     info "Generating secrets..."
 
     local pg_pass jwt_secret redis_pass minio_pass secrets_key docker_gid searxng_api_key searxng_secret_key
-    local rag_pg_pass rag_notify_secret
+    local rag_pg_pass
 
     pg_pass=$(openssl rand -hex 32)
     jwt_secret=$(openssl rand -base64 32)
@@ -107,7 +107,6 @@ generate_and_write_env() {
     searxng_api_key=$(openssl rand -hex 32)
     searxng_secret_key=$(openssl rand -hex 32)
     rag_pg_pass=$(openssl rand -hex 24)
-    rag_notify_secret=$(openssl rand -hex 32)
     forge_app_db_pass=$(openssl rand -hex 24)
 
     info "Writing .env to $INSTALL_DIR/.env"
@@ -165,7 +164,6 @@ SEARXNG_SECRET_KEY=$searxng_secret_key
 # calls use it so usage shows up under "rag" rather than under an app.
 RAG_PG_PASSWORD=$rag_pg_pass
 RAG_PG_URL=postgres://forge:${rag_pg_pass}@forge-rag-pg:5432/rag?sslmode=disable
-RAG_NOTIFY_SECRET=$rag_notify_secret
 RAG_GATEWAY_TOKEN=
 RAG_WORKER_CONCURRENCY=2
 RAG_MAX_PDF_BYTES=104857600
@@ -191,6 +189,10 @@ clone_repo() {
 }
 
 start_services() {
+    # deploy.sh itself runs via `curl | bash`, so $0 isn't a path into the
+    # cloned repo — reach the preflight check via INSTALL_DIR instead.
+    "$INSTALL_DIR/scripts/preflight-objectstore.sh"
+
     info "Pulling latest images..."
     docker compose -f "$INSTALL_DIR/docker-compose.yml" \
         --env-file "$INSTALL_DIR/.env" pull

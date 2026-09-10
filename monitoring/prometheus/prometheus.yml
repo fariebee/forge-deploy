@@ -42,9 +42,9 @@ scrape_configs:
           forge_service: redis
 
   - job_name: minio
-    metrics_path: /minio/v2/metrics/cluster
+    metrics_path: /metrics
     static_configs:
-      - targets: ["minio:9000"]
+      - targets: ["minio:9327"]
         labels:
           forge_service: minio
 
