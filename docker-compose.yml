@@ -294,10 +294,18 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    # No cap_add: the image's entrypoint runs `weed` directly as root (no
-    # gosu/setuid drop, unlike postgres/redis/caddy above), so it needs no
-    # capability grants to write /data or /etc/seaweedfs.
+    # /data is owned by the image's `seaweed` user, so root needs
+    # CAP_DAC_OVERRIDE (plus CHOWN/FOWNER) to create new volume files there —
+    # without it, new volumes fail with "open /data/236.dat: permission denied".
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
     entrypoint: ["/bin/sh", "-c"]
+    # -volume.max=0 auto-sizes from free disk, but every bucket gets its own
+    # collection and grows 7 volumes per collection at a time — a handful of
+    # buckets can exhaust a small volume-slot budget and stall every PUT with
+    # "Not enough data nodes found". 500 is a slot count, not preallocated disk.
     command:
       - >
         set -e &&
@@ -309,7 +317,7 @@ services:
         "$$u" "$$p" > /etc/seaweedfs/s3.json &&
         exec weed server -dir=/data -ip=minio -ip.bind=0.0.0.0
         -filer -s3 -s3.port=9000 -s3.config=/etc/seaweedfs/s3.json
-        -metricsPort=9327 -volume.max=0 -master.volumeSizeLimitMB=1024
+        -metricsPort=9327 -volume.max=500 -master.volumeSizeLimitMB=1024
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER must be set}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be set}
