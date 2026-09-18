@@ -139,6 +139,14 @@ services:
       # you also re-pin the caddy-proxy ipam subnet below.
       TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-}
       EXPOSED_PORT_RANGE: ${EXPOSED_PORT_RANGE:-20000-20999}
+      # The host ports this stack publishes (see each service's `ports:`).
+      # Passed through so the ports service refuses to hand one of them to an
+      # app container; without these it only knows the defaults below.
+      PG_DIRECT_EXTERNAL_PORT: ${PG_DIRECT_EXTERNAL_PORT:-5432}
+      PG_EXTERNAL_PORT: ${PG_EXTERNAL_PORT:-6432}
+      REDIS_EXTERNAL_PORT: ${REDIS_EXTERNAL_PORT:-6379}
+      APP_EXTERNAL_PORT: ${APP_EXTERNAL_PORT:-3001}
+      GRAFANA_EXTERNAL_PORT: ${GRAFANA_EXTERNAL_PORT:-3002}
       DOMAIN: ${DOMAIN:-localhost}
       REGISTRY_URL: registry.${DOMAIN:-localhost}
       FORGE_REGISTRY_AUTH_KEY: ${FORGE_REGISTRY_AUTH_KEY:-}
