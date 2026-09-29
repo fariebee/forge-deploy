@@ -120,6 +120,14 @@ services:
       # usage_hourly, one Docker stats read per container per minute). Off by
       # default; the SA PaaS host turns it on for billing.
       USAGE_METERING_ENABLED: ${USAGE_METERING_ENABLED:-false}
+      # Managed MariaDB (one mariadb:11.4 container per project, on its own
+      # internal network). Off by default: the /api/mariadb-projects routes
+      # answer 404 and no MariaDB loop runs. SUBNET_RANGE is the block each
+      # project takes a /27 from (change it if your LAN uses 10.91.0.0/16);
+      # MAX_SIZE_MB caps one project's InnoDB data (at least 256).
+      MARIADB_ENABLED: ${MARIADB_ENABLED:-false}
+      MARIADB_SUBNET_RANGE: ${MARIADB_SUBNET_RANGE:-10.91.0.0/16}
+      MARIADB_MAX_SIZE_MB: ${MARIADB_MAX_SIZE_MB:-5120}
       # RevEx billing (CLAUDE.md "Billing (RevEx)"): off unless both URL and
       # key are set. DUNNING_* only matter with it on.
       REVEX_API_URL: ${REVEX_API_URL:-}
