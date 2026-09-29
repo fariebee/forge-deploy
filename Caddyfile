@@ -50,10 +50,31 @@
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Frame-Options "DENY"
 		X-Content-Type-Options "nosniff"
-		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+		Content-Security-Policy "default-src 'self'; script-src 'self' https://challenges.cloudflare.com https://js.hcaptcha.com https://*.hcaptcha.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://challenges.cloudflare.com https://*.hcaptcha.com; frame-src https://challenges.cloudflare.com https://*.hcaptcha.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
 	}
 	reverse_proxy forge-edge:3000
 }
+
+# Tenant apps apex (TENANT_APPS_DOMAIN, CLAUDE.md "Tenant apps domain"): apps
+# of every org but the default one live on *.{$TENANT_APPS_DOMAIN}. The marker
+# lines delimit the block that caddy/entrypoint.sh and caddy.Generate strip
+# when the variable is unset (a bare `*.` is not a site address). No dashboard
+# headers here — tenant apps set their own. The backend's AppProxy answers
+# 404, never the dashboard, for a host here that names no app. The bare apex
+# only redirects to the brand site (which carries the abuse contact the Public
+# Suffix List asks for): once it is a public suffix it must set no cookies.
+##TENANT_APPS_BEGIN##
+*.{$TENANT_APPS_DOMAIN} {
+	tls {
+		##DNS_BLOCK##
+	}
+	reverse_proxy forge-edge:3000
+}
+
+{$TENANT_APPS_DOMAIN} {
+	redir https://{$DOMAIN}/
+}
+##TENANT_APPS_END##
 
 # Custom domains — on-demand TLS via HTTP-01.
 :443 {
@@ -70,6 +91,18 @@ s3.{$DOMAIN} {
 	# public route — block it here.
 	@metrics path /minio/v2/metrics/*
 	respond @metrics 403
+	##S3_SANDBOX_BEGIN##
+	# S3_CONTENT_SANDBOX=true keeps this block (caddy/entrypoint.sh and
+	# caddy.Generate strip it otherwise). Every org's bucket credentials work
+	# here, so a presigned GET can serve tenant-uploaded HTML on the
+	# dashboard's domain, where its script could set Domain=DOMAIN cookies.
+	# `sandbox` gives such a page an opaque origin (no script, no cookies);
+	# S3 API clients ignore both headers.
+	header {
+		Content-Security-Policy "sandbox"
+		X-Content-Type-Options "nosniff"
+	}
+	##S3_SANDBOX_END##
 	reverse_proxy minio:9000
 }
 
@@ -102,7 +135,7 @@ registry.{$DOMAIN} {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Frame-Options "DENY"
 		X-Content-Type-Options "nosniff"
-		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+		Content-Security-Policy "default-src 'self'; script-src 'self' https://challenges.cloudflare.com https://js.hcaptcha.com https://*.hcaptcha.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://challenges.cloudflare.com https://*.hcaptcha.com; frame-src https://challenges.cloudflare.com https://*.hcaptcha.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
 	}
 	reverse_proxy forge-edge:3000
 }

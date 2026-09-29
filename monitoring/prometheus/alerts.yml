@@ -152,3 +152,16 @@ groups:
           severity: warning
         annotations:
           summary: "Host disk with /opt/pgforge/backups is {{ $value | humanizePercentage }} full — backups will fail"
+
+      # ── Org disk quota (B4, td-c31dac) ───────────────────────────────────
+      # The backend's hourly disk sweep (usage service) publishes
+      # forge_org_disk_usage_bytes / forge_org_disk_quota_bytes per org. The
+      # series only exist on installs with USAGE_METERING_ENABLED — no series,
+      # no alert. 80% is the early warning; deploy refusal kicks in at 100%.
+      - alert: ForgeOrgDiskNearQuota
+        expr: forge_org_disk_usage_bytes / forge_org_disk_quota_bytes >= 0.8
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Org {{ $labels.org_id }} is at {{ $value | humanizePercentage }} of its disk quota — deploys are refused at 100%"

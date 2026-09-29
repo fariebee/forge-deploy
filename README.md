@@ -9,4 +9,7 @@ CI — don't edit here, changes are overwritten.
 curl -fsSL https://raw.githubusercontent.com/fariebee/forge-deploy/main/scripts/deploy.sh | sudo bash
 ```
 
+Requires Ubuntu/Debian, Docker Engine 28 or later and Docker Compose v2.34.0
+or later (the installer checks Compose and stops if it is older).
+
 Licensed under [FSL-1.1-ALv2](./LICENSE.md).

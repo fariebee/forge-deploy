@@ -47,8 +47,23 @@ install_docker() {
     info "Docker installed"
 }
 
+# docker-compose.yml's gw_priority needs Compose v2.34.0: older releases
+# reject the file outright, and v2.33.x silently drops the key.
+MIN_COMPOSE="2.34.0"
+
+check_compose() {
+    local v
+    v=$(docker compose version --short 2>/dev/null | sed 's/^v//; s/[^0-9.].*//' || true)
+    [[ -n "$v" ]] || die "Docker Compose v2 plugin not found — install it: https://docs.docker.com/compose/install/linux/"
+    if [[ "$(printf '%s\n%s\n' "$MIN_COMPOSE" "$v" | sort -V | head -n1)" != "$MIN_COMPOSE" ]]; then
+        die "Docker Compose $v is too old: Forge needs >= $MIN_COMPOSE. Upgrade the docker-compose-plugin package (apt-get install --only-upgrade docker-compose-plugin) or see https://docs.docker.com/compose/install/linux/"
+    fi
+    info "Docker Compose $v"
+}
+
 install_deps() {
     install_docker
+    check_compose
 }
 
 # ── Config prompts ────────────────────────────────────────────────────────────
@@ -147,7 +162,7 @@ REGISTRY_URL=registry.$DOMAIN
 
 GODADDY_API_TOKEN=$GODADDY_API_TOKEN
 
-# Multitenancy RLS backstop: password for the non-superuser `forge_app` Postgres
+# Multitenancy RLS backstop: password for the non-superuser forge_app Postgres
 # role. Forge serves read requests through it so the row-level-security
 # org_isolation policies actually apply (the main pool is a superuser and
 # bypasses FORCE RLS). The role is created/updated automatically at startup.
@@ -241,6 +256,7 @@ fresh_install() {
     start_services
     wait_for_postgres
     install_host_cli
+    install_gvisor
     print_summary "$DOMAIN" "$ADMIN_PASSWORD"
 }
 
@@ -253,6 +269,7 @@ do_update() {
     start_services
     wait_for_postgres
     install_host_cli
+    install_gvisor
 
     local version
     version=$(git -C "$INSTALL_DIR" describe --tags --always 2>/dev/null || echo "latest")
@@ -261,6 +278,16 @@ do_update() {
     bold "  Forge updated to $version"
     bold "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
+}
+
+# install_gvisor registers gVisor's runsc with Docker when INSTALL_GVISOR=true
+# (curl ... | sudo INSTALL_GVISOR=true bash). Tenant apps only run on it once
+# TENANT_RUNTIME=runsc is also set in .env — see docs/runbooks/gvisor.md.
+install_gvisor() {
+    [[ "${INSTALL_GVISOR:-false}" == "true" ]] || return 0
+    info "Installing gVisor (runsc)..."
+    bash "$INSTALL_DIR/scripts/install-gvisor.sh" \
+        || warn "gVisor install failed — do not set TENANT_RUNTIME=runsc until scripts/install-gvisor.sh succeeds"
 }
 
 # install_host_cli pulls the `pgforge` binary out of the running app container

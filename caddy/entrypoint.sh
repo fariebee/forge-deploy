@@ -21,6 +21,18 @@ fi
 TLS_BLOCK_ESC=$(printf '%s' "$TLS_BLOCK" | sed 's/[\\&|]/\\&/g')
 sed "s|##DNS_BLOCK##|$TLS_BLOCK_ESC|" /etc/caddy/Caddyfile > /tmp/Caddyfile
 
+# Without a tenant apex, drop its site block: `*.` alone is not a valid site
+# address. Keep in sync with caddy.Generate (backend/internal/service/caddy).
+if [ -z "$TENANT_APPS_DOMAIN" ]; then
+    sed '/##TENANT_APPS_BEGIN##/,/##TENANT_APPS_END##/d' /tmp/Caddyfile > /tmp/Caddyfile.tmp && mv /tmp/Caddyfile.tmp /tmp/Caddyfile
+fi
+# The s3 block's sandbox headers are opt-in: S3_CONTENT_SANDBOX takes Go's
+# strconv.ParseBool true spellings, as the backend's re-render does.
+case "$S3_CONTENT_SANDBOX" in
+    1|t|T|true|TRUE|True) ;;
+    *) sed '/##S3_SANDBOX_BEGIN##/,/##S3_SANDBOX_END##/d' /tmp/Caddyfile > /tmp/Caddyfile.tmp && mv /tmp/Caddyfile.tmp /tmp/Caddyfile ;;
+esac
+
 if [ "$TLS_BLOCK" = "on_demand" ]; then
     # No DNS token path. The Caddyfile's explicit single-label subdomain blocks
     # (registry, s3, search, monitor, ...) carry no tls directive, so Caddy

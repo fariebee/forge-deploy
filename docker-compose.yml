@@ -98,19 +98,86 @@ services:
       # No colon inside the :? message — compose v5.1.x fails parse on it.
       SECRETS_KEY: ${SECRETS_KEY:?SECRETS_KEY must be set (64 hex chars, openssl rand -hex 32)}
       FORGE_APP_DB_PASSWORD: ${FORGE_APP_DB_PASSWORD:-}
+      MAX_OWNED_ORGS_PER_IDENTITY: ${MAX_OWNED_ORGS_PER_IDENTITY:-1}
       # Egress SSRF boundary. Programs host iptables/DOCKER-USER, so it only
       # works on Linux hosts; set false for Docker Desktop (macOS/Windows).
       EGRESS_POLICY_ENABLED: ${EGRESS_POLICY_ENABLED:-true}
       EGRESS_ALLOW_CIDRS: ${EGRESS_ALLOW_CIDRS:-}
+      EGRESS_BLOCK_PORTS: ${EGRESS_BLOCK_PORTS:-}
       EGRESS_RECONCILE_INTERVAL: ${EGRESS_RECONCILE_INTERVAL:-30s}
       # Dial-level counterpart, for connections the server process makes
       # itself (git clone/fetch, webhook delivery) and never traverse
       # DOCKER-USER. Without this line the .env setting never reaches the
       # process and private git remotes have no escape hatch.
       NETGUARD_ALLOW_CIDRS: ${NETGUARD_ALLOW_CIDRS:-}
+      # Gates Caddyfile-discovered "extra route" hostnames (real external
+      # domains, or anything deeper than one label under DOMAIN) on being a
+      # verified custom domain before Forge routes to them or approves their
+      # TLS cert. Off by default so an existing install's already-routed
+      # unverified host keeps working; the SA PaaS host sets this true.
+      REQUIRE_VERIFIED_EXTRA_ROUTES: ${REQUIRE_VERIFIED_EXTRA_ROUTES:-false}
+      # Per-org usage metering (CPU/memory/network of tenant containers into
+      # usage_hourly, one Docker stats read per container per minute). Off by
+      # default; the SA PaaS host turns it on for billing.
+      USAGE_METERING_ENABLED: ${USAGE_METERING_ENABLED:-false}
+      # RevEx billing (CLAUDE.md "Billing (RevEx)"): off unless both URL and
+      # key are set. DUNNING_* only matter with it on.
+      REVEX_API_URL: ${REVEX_API_URL:-}
+      REVEX_API_KEY: ${REVEX_API_KEY:-}
+      REVEX_SYNC_INTERVAL: ${REVEX_SYNC_INTERVAL:-5m}
+      DUNNING_SUSPEND_AFTER_DAYS: ${DUNNING_SUSPEND_AFTER_DAYS:-14}
+      DUNNING_DELETE_AFTER_DAYS: ${DUNNING_DELETE_AFTER_DAYS:-0}
+      DUNNING_DELETE_WARN_DAYS: ${DUNNING_DELETE_WARN_DAYS:-7}
+      DUNNING_AUTO_DELETE: ${DUNNING_AUTO_DELETE:-false}
+      # OCI runtime (e.g. runsc) for every app container outside the default
+      # org. Empty = docker's default. Install it first: docs/runbooks/gvisor.md.
+      TENANT_RUNTIME: ${TENANT_RUNTIME:-}
+      # buildkitd container (scripts/install-tenant-builder.sh) that builds the
+      # images of every app outside the default org. Empty = the host's own.
+      TENANT_BUILDKIT: ${TENANT_BUILDKIT:-}
+      # Global cap on concurrent docker builds (one per org is always enforced).
+      BUILD_MAX_CONCURRENT: ${BUILD_MAX_CONCURRENT:-2}
+      # Lets orgs outside the default org without their own email key use the
+      # platform Resend key. Off by default: they must bring their own.
+      EMAIL_PLATFORM_RELAY_FOR_TENANTS: ${EMAIL_PLATFORM_RELAY_FOR_TENANTS:-false}
+      # With the flag above, a Buzzz key makes the platform relay a Forge-side
+      # relay held to each org's verified sender domains and send limits.
+      BUZZZ_API_KEY: ${BUZZZ_API_KEY:-}
+      BUZZZ_API_URL: ${BUZZZ_API_URL:-https://buzzzmail.co.za}
+      # With the relay on, give each relay org's apps a Buzzz key of their own.
+      BUZZZ_TENANT_KEYS: ${BUZZZ_TENANT_KEYS:-false}
+      # Crypto-mining detection: samples capped tenant app containers once a
+      # minute; a container pinned at its CPU cap >30 min gets its app
+      # auto-stopped, audited (mining_stop) and the operator emailed. Off by
+      # default — opt in once limits (B1) and operator email are configured.
+      MINING_DETECTION_ENABLED: ${MINING_DETECTION_ENABLED:-false}
+      # Operator paging: PagerDuty Events API v2 sink on the operator alerter
+      # (mining auto-stop, backup run failures, egress boundary shortfalls,
+      # cluster failover/unreachable/replication_error). Empty (default) is
+      # email-only, exactly today's behaviour — see docs/runbooks/pagerduty.md.
+      PAGERDUTY_ROUTING_KEY: ${PAGERDUTY_ROUTING_KEY:-}
+      # Distinguishes this node's egress boundary PagerDuty alerts from its
+      # cluster siblings (the egress loop runs on every node). Empty falls
+      # back to EffectiveClusterRole (primary/standby) — set per node on an
+      # HA install with more than one standby.
+      FORGE_NODE_NAME: ${FORGE_NODE_NAME:-}
       # Optional: pin a provisioned Kratos instance to back Forge's own login.
       FORGE_AUTH_KRATOS_ID: ${FORGE_AUTH_KRATOS_ID:-}
       FORGE_AUTH_ADMIN_EMAIL: ${FORGE_AUTH_ADMIN_EMAIL:-admin@localhost}
+      # Self-service tenant signup: off by default. See CLAUDE.md "Self-serve signup".
+      FORGE_AUTH_SIGNUP_ENABLED: ${FORGE_AUTH_SIGNUP_ENABLED:-false}
+      FORGE_AUTH_REQUIRE_VERIFIED_EMAIL: ${FORGE_AUTH_REQUIRE_VERIFIED_EMAIL:-false}
+      SIGNUP_CAPTCHA_PROVIDER: ${SIGNUP_CAPTCHA_PROVIDER:-}
+      SIGNUP_CAPTCHA_SECRET: ${SIGNUP_CAPTCHA_SECRET:-}
+      SIGNUP_CAPTCHA_SITE_KEY: ${SIGNUP_CAPTCHA_SITE_KEY:-}
+      SIGNUP_BLOCK_DISPOSABLE: ${SIGNUP_BLOCK_DISPOSABLE:-false}
+      SIGNUP_BLOCKED_DOMAINS: ${SIGNUP_BLOCKED_DOMAINS:-}
+      SIGNUP_REQUIRE_PAYMENT_METHOD: ${SIGNUP_REQUIRE_PAYMENT_METHOD:-false}
+      # D4: ToS/AUP/privacy acceptance at signup. Empty version = off.
+      SIGNUP_TERMS_VERSION: ${SIGNUP_TERMS_VERSION:-}
+      SIGNUP_TERMS_URL: ${SIGNUP_TERMS_URL:-}
+      SIGNUP_AUP_URL: ${SIGNUP_AUP_URL:-}
+      SIGNUP_PRIVACY_URL: ${SIGNUP_PRIVACY_URL:-}
       PUBLIC_PG_HOST: ${PUBLIC_PG_HOST:-${DOMAIN:-localhost}}
       PUBLIC_PG_PORT: ${PUBLIC_PG_PORT:-6432}
       PUBLIC_PG_DIRECT_PORT: ${PUBLIC_PG_DIRECT_PORT:-${PG_DIRECT_EXTERNAL_PORT:-5432}}
@@ -130,6 +197,18 @@ services:
       CADDY_ADMIN_URL: http://10.89.0.2:2019
       APPS_BASE_PATH: /opt/pgforge/apps
       BACKUPS_BASE_PATH: /opt/pgforge/backups
+      # Off-host copy target (optional; the config existed before it was ever
+      # wired into compose — an unset var here is a silent no-op).
+      BACKUP_S3_ENDPOINT: ${BACKUP_S3_ENDPOINT:-}
+      BACKUP_S3_ACCESS_KEY: ${BACKUP_S3_ACCESS_KEY:-}
+      BACKUP_S3_SECRET_KEY: ${BACKUP_S3_SECRET_KEY:-}
+      BACKUP_S3_USE_SSL: ${BACKUP_S3_USE_SSL:-true}
+      BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET:-}
+      BACKUP_S3_REGION: ${BACKUP_S3_REGION:-}
+      # Nightly Postgres/Redis backup scheduler (primary-only; off by default).
+      BACKUP_SCHEDULE_ENABLED: ${BACKUP_SCHEDULE_ENABLED:-false}
+      BACKUP_HOUR_UTC: ${BACKUP_HOUR_UTC:-1}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-7}
       PGFORGE_NETWORK: pgforge-net
       # X-Forwarded-For is honored ONLY from the pinned `caddy-proxy` edge
       # subnet (10.90.0.0/24) — the dedicated, internal-only network Caddy
@@ -148,6 +227,13 @@ services:
       APP_EXTERNAL_PORT: ${APP_EXTERNAL_PORT:-3001}
       GRAFANA_EXTERNAL_PORT: ${GRAFANA_EXTERNAL_PORT:-3002}
       DOMAIN: ${DOMAIN:-localhost}
+      # Separate apex for every org but the default one's apps (tenant code
+      # off the dashboard's domain). Empty = all apps on DOMAIN. Must match
+      # the caddy service's value. See CLAUDE.md "Tenant apps domain".
+      TENANT_APPS_DOMAIN: ${TENANT_APPS_DOMAIN:-}
+      # CSP sandbox + nosniff on s3.DOMAIN (tenant-uploaded HTML can't script
+      # the dashboard's domain). Off by default; must match the caddy service.
+      S3_CONTENT_SANDBOX: ${S3_CONTENT_SANDBOX:-false}
       REGISTRY_URL: registry.${DOMAIN:-localhost}
       FORGE_REGISTRY_AUTH_KEY: ${FORGE_REGISTRY_AUTH_KEY:-}
       # GenAI (optional; feature hidden when GENAI_API_KEY is unset)
@@ -175,6 +261,16 @@ services:
       # Public Grafana URL for the monitoring profile. Empty hides the
       # dashboard's Monitoring nav item and per-app deep links.
       MONITORING_URL: ${MONITORING_URL:-}
+      # Contact URL for /.well-known/security.txt (RFC 9116).
+      SECURITY_CONTACT: ${SECURITY_CONTACT:-https://github.com/fariebee/forge/security/advisories/new}
+      # "Report abuse" link (client-config, suspension page, landing footer).
+      ABUSE_CONTACT: ${ABUSE_CONTACT:-}
+      # Marketing page at "/" (default off: "/" redirects to /dashboard). The
+      # three URLs are mailto:/https: only; an empty one hides its link.
+      LANDING_PAGE_ENABLED: ${LANDING_PAGE_ENABLED:-false}
+      LANDING_REQUEST_ACCESS_URL: ${LANDING_REQUEST_ACCESS_URL:-}
+      LANDING_DOCS_URL: ${LANDING_DOCS_URL:-}
+      LANDING_STATUS_URL: ${LANDING_STATUS_URL:-}
       # OTLP trace export target. Empty by default (tracing off, zero overhead).
       # Set to http://alloy:4318 in .env to ship Forge-backend traces to Tempo
       # via Alloy when the monitoring profile is on.
@@ -199,6 +295,17 @@ services:
         condition: service_healthy
     networks:
       pgforge-net:
+        # Forge joins this container (and caddy, pgbouncer, minio) to every
+        # tenant app network, where a tenant may name a service postgres,
+        # minio, app, ... Docker's DNS answers a bare name from the endpoint
+        # with the highest gw_priority, then from the network whose name sorts
+        # first, so this keeps the stack network authoritative whatever the
+        # compose project is called. Needs Compose >= v2.34.0 (older ones
+        # reject this file; v2.33.x drops the key) — scripts/deploy.sh checks.
+        # An engine older than 28 ignores it and Forge's boot check falls back
+        # to the name order. Keep the four services in sync with stackDialers
+        # in backend/internal/service/apps/stack_dns.go.
+        gw_priority: 1
       # Internal-only admin network, shared with caddy (see caddy service).
       # The backend reaches Caddy's admin API on 10.89.0.2:2019.
       caddy-admin:
@@ -240,7 +347,8 @@ services:
       postgres:
         condition: service_healthy
     networks:
-      - pgforge-net
+      pgforge-net:
+        gw_priority: 1 # dials host=postgres from tenant networks; see the app service
 
   redis:
     image: redis:8-alpine
@@ -336,7 +444,8 @@ services:
       # object data.
       - seaweedfs_s3_config:/etc/seaweedfs
     networks:
-      - pgforge-net
+      pgforge-net:
+        gw_priority: 1 # resolves its own -ip=minio; see the app service
     healthcheck:
       # The S3 port has no /healthz of its own (upstream #8243); the master
       # port always does. The S3 listener can come up after the master, so
@@ -404,6 +513,8 @@ services:
     environment:
       - DNS_PROVIDER=${DNS_PROVIDER:-godaddy}
       - DOMAIN=${DOMAIN:-localhost}
+      - TENANT_APPS_DOMAIN=${TENANT_APPS_DOMAIN:-}
+      - S3_CONTENT_SANDBOX=${S3_CONTENT_SANDBOX:-false}
       - GODADDY_API_TOKEN=${GODADDY_API_TOKEN:-}
       - CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN:-}
       - SEARXNG_API_KEY=${SEARXNG_API_KEY:-}
@@ -419,6 +530,7 @@ services:
       - app
     networks:
       pgforge-net:
+        gw_priority: 1 # stack DNS wins over tenant networks; see the app service
       # Internal-only admin network: the backend (app) and monitoring
       # prometheus join it to reach the Caddy admin API; tenant app containers
       # are never attached, so they have no route to the admin listener.
