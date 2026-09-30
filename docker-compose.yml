@@ -116,6 +116,12 @@ services:
       # TLS cert. Off by default so an existing install's already-routed
       # unverified host keeps working; the SA PaaS host sets this true.
       REQUIRE_VERIFIED_EXTRA_ROUTES: ${REQUIRE_VERIFIED_EXTRA_ROUTES:-false}
+      # Trivy scan of each "warn"-policy app's image after a deploy (recorded,
+      # never blocking). Off by default so an existing install is unchanged;
+      # "block_critical" apps always scan before the swap. SCAN_TIMEOUT bounds
+      # one Trivy run.
+      SCAN_ON_DEPLOY: ${SCAN_ON_DEPLOY:-false}
+      SCAN_TIMEOUT: ${SCAN_TIMEOUT:-300s}
       # Per-org usage metering (CPU/memory/network of tenant containers into
       # usage_hourly, one Docker stats read per container per minute). Off by
       # default; the SA PaaS host turns it on for billing.
