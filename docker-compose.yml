@@ -134,6 +134,12 @@ services:
       MARIADB_ENABLED: ${MARIADB_ENABLED:-false}
       MARIADB_SUBNET_RANGE: ${MARIADB_SUBNET_RANGE:-10.91.0.0/16}
       MARIADB_MAX_SIZE_MB: ${MARIADB_MAX_SIZE_MB:-5120}
+      # Backups a MariaDB project keeps (manual + scheduled, newest win). They
+      # stay on this host, so this bounds the backup directory's use.
+      MARIADB_BACKUP_KEEP: ${MARIADB_BACKUP_KEEP:-7}
+      # Free space the backup directory's filesystem must keep beyond one
+      # backup's worst case; below it MariaDB backups are refused (MiB).
+      MARIADB_BACKUP_MIN_FREE_MB: ${MARIADB_BACKUP_MIN_FREE_MB:-5120}
       # RevEx billing (CLAUDE.md "Billing (RevEx)"): off unless both URL and
       # key are set. DUNNING_* only matter with it on.
       REVEX_API_URL: ${REVEX_API_URL:-}
