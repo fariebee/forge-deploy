@@ -61,6 +61,10 @@ services:
     image: ghcr.io/fariebee/forge:latest
     container_name: pgforge-app
     restart: unless-stopped
+    # Docker's SIGKILL deadline after SIGTERM. 10s is Docker's own default;
+    # with FORGE_SHUTDOWN_DRAIN_TIMEOUT set, raise it to about the drain + 5m
+    # so Docker doesn't kill the drain.
+    stop_grace_period: ${FORGE_STOP_GRACE_PERIOD:-10s}
     labels:
       forge_service: app
     # no-new-privileges is safe here: the backend never execs setuid binaries
@@ -155,8 +159,25 @@ services:
       # buildkitd container (scripts/install-tenant-builder.sh) that builds the
       # images of every app outside the default org. Empty = the host's own.
       TENANT_BUILDKIT: ${TENANT_BUILDKIT:-}
+      # Base images pre-pulled into that builder (comma separated). Empty = off.
+      TENANT_BUILDKIT_PREWARM_IMAGES: ${TENANT_BUILDKIT_PREWARM_IMAGES:-}
+      # "registry": tenant builds on TENANT_BUILDKIT reuse a per-app layer cache
+      # kept in the org's namespace on the built-in registry. Empty = off.
+      TENANT_BUILD_CACHE: ${TENANT_BUILD_CACHE:-}
       # Global cap on concurrent docker builds (one per org is always enforced).
       BUILD_MAX_CONCURRENT: ${BUILD_MAX_CONCURRENT:-2}
+      # How long a stop/restart (every release) waits for in-flight app
+      # deploys before exiting. 0 (default) = don't wait; 25m is recommended
+      # on hosts that take tenant builds, with FORGE_STOP_GRACE_PERIOD=30m.
+      FORGE_SHUTDOWN_DRAIN_TIMEOUT: ${FORGE_SHUTDOWN_DRAIN_TIMEOUT:-0}
+      # Deadline for one compose up/build (the step that builds a compose app's
+      # images), capped at 90m. A whole background deploy gets it + 10m (min 30m).
+      COMPOSE_UP_TIMEOUT: ${COMPOSE_UP_TIMEOUT:-20m}
+      # Deadline for one image build of an app outside the default org, ahead
+      # of its compose up (capped at 90m).
+      TENANT_BUILD_TIMEOUT: ${TENANT_BUILD_TIMEOUT:-20m}
+      # Deadline for one static-site build container.
+      BUILD_TIMEOUT: ${BUILD_TIMEOUT:-10m}
       # Lets orgs outside the default org without their own email key use the
       # platform Resend key. Off by default: they must bring their own.
       EMAIL_PLATFORM_RELAY_FOR_TENANTS: ${EMAIL_PLATFORM_RELAY_FOR_TENANTS:-false}

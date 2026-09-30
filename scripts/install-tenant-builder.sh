@@ -40,6 +40,14 @@ MIN_FREE_GB=${MIN_FREE_GB:-20}
 # behaviour (cache in a plain docker volume, host-fs WARNING only).
 # Unset (default): sized from the host's free space, capped at 50 GB.
 BUILDER_DISK_GB=${BUILDER_DISK_GB:-}
+# Opt-in (td-3da493): keep the cache in a tmpfs of this many GB inside the
+# sandbox, with buildkitd's overlayfs snapshotter, instead of on the loop fs
+# with the native one. gVisor's own tmpfs has the overlay xattrs a host mount
+# lacks (opaque whiteouts build), and cache I/O never leaves the sentry: a
+# cold node:lts build drops from ~12 min to ~1. The cache is RAM, counted in
+# the container's --memory (raised by this much, so MEMORY stays the builds'
+# own), and starts empty whenever the container restarts. Unset: disk cache.
+BUILDER_TMPFS_GB=${BUILDER_TMPFS_GB:-}
 LOOP_IMG=/var/lib/forge-tenant-buildkit.img
 LOOP_MNT=/var/lib/forge-tenant-buildkit
 IMAGE=moby/buildkit:v0.32.2
@@ -52,67 +60,81 @@ die() { echo "install-tenant-builder: $*" >&2; exit 1; }
 command -v docker >/dev/null || die "docker not found"
 docker info --format '{{json .Runtimes}}' | grep -q '"runsc-netstack"' \
     || die "runsc-netstack is not registered with dockerd — run scripts/install-gvisor.sh first"
-[[ $CACHE_GB =~ ^[0-9]+$ && $CACHE_GB -ge 2 ]] || die "CACHE_GB must be a whole number of GB, at least 2"
-[[ $MIN_FREE_GB =~ ^[0-9]+$ ]] || die "MIN_FREE_GB must be a whole number of GB"
-[[ -z $BUILDER_DISK_GB || $BUILDER_DISK_GB =~ ^[0-9]+$ ]] || die "BUILDER_DISK_GB must be a whole number of GB (0 disables it)"
+# No leading zeros (bash arithmetic reads 08 as bad octal) and at most 4
+# digits, so nothing overflows or dies mid-arithmetic after the old builder
+# has already been removed.
+GB='^(0|[1-9][0-9]{0,3})$'
+[[ $CACHE_GB =~ $GB && $CACHE_GB -ge 2 ]] || die "CACHE_GB must be a whole number of GB, 2-9999"
+[[ $MIN_FREE_GB =~ $GB ]] || die "MIN_FREE_GB must be a whole number of GB, 0-9999"
+[[ -z $BUILDER_DISK_GB || $BUILDER_DISK_GB =~ $GB ]] || die "BUILDER_DISK_GB must be a whole number of GB, 0-9999 (0 disables it)"
+[[ -z $BUILDER_TMPFS_GB || $BUILDER_TMPFS_GB =~ $GB && $BUILDER_TMPFS_GB -ge 4 ]] || die "BUILDER_TMPFS_GB must be a whole number of GB, 4-9999"
+[[ -z $BUILDER_TMPFS_GB || $MEMORY =~ ^[1-9][0-9]{0,3}g$ ]] || die "BUILDER_TMPFS_GB needs MEMORY in whole GB (e.g. 4g), got '$MEMORY'"
 
-free_gb=$(df --output=avail -BG /var/lib 2>/dev/null | tail -1 | tr -dc '0-9')
-free_gb=${free_gb:-0}
-if [[ -z $BUILDER_DISK_GB ]]; then
-    BUILDER_DISK_GB=$(( free_gb / 4 ))
-    [[ $BUILDER_DISK_GB -gt 50 ]] && BUILDER_DISK_GB=50
-    [[ $BUILDER_DISK_GB -ge 15 ]] \
-        || die "only ${free_gb}G free under /var/lib — too little for a 15G+ builder disk; free space, or set BUILDER_DISK_GB explicitly (0 disables the cap)"
-fi
-
-if [[ $BUILDER_DISK_GB -gt 0 ]]; then
-    # Cache caps must leave room inside the loop fs, not just below
-    # buildkitd's percentage-of-disk defaults.
-    if (( CACHE_GB + MIN_FREE_GB > BUILDER_DISK_GB )); then
-        MIN_FREE_GB=$(( BUILDER_DISK_GB / 5 ))
-        [[ $MIN_FREE_GB -lt 1 ]] && MIN_FREE_GB=1
-        CACHE_GB=$(( BUILDER_DISK_GB / 2 ))
-        [[ $CACHE_GB -lt 2 ]] && CACHE_GB=2
-        echo "install-tenant-builder: CACHE_GB/MIN_FREE_GB didn't fit BUILDER_DISK_GB=${BUILDER_DISK_GB}G — clamped to CACHE_GB=$CACHE_GB MIN_FREE_GB=$MIN_FREE_GB" >&2
-    fi
-
-    # Idempotent: an existing image/mount from a previous run is reused as-is
-    # (no resize) so a re-run doesn't lose the cache or need a bigger disk.
-    if [[ ! -f $LOOP_IMG ]]; then
-        # fallocate reserves the whole size now, so keep 10G of headroom.
-        (( free_gb >= BUILDER_DISK_GB + 10 )) \
-            || die "BUILDER_DISK_GB=${BUILDER_DISK_GB}G needs ${BUILDER_DISK_GB}G + 10G headroom, only ${free_gb}G free under /var/lib"
-        fallocate -l "${BUILDER_DISK_GB}G" "$LOOP_IMG"
-        mkfs.ext4 -q "$LOOP_IMG"
-    fi
-    mkdir -p "$LOOP_MNT"
-    grep -qF "$LOOP_IMG" /etc/fstab \
-        || echo "$LOOP_IMG $LOOP_MNT ext4 loop,nofail 0 0" >> /etc/fstab
-    mountpoint -q "$LOOP_MNT" || mount "$LOOP_MNT"
-    mountpoint -q "$LOOP_MNT" || die "$LOOP_MNT did not mount — check /etc/fstab and $LOOP_IMG"
-
-    if ! device=$(docker volume inspect --format '{{index .Options "device"}}' "$VOLUME" 2>/dev/null) \
-        || [[ $device != "$LOOP_MNT" ]]; then
-        # The old builder holds the volume; it is recreated below anyway.
-        docker rm -f "$NAME" >/dev/null 2>&1 || true
-        docker volume rm "$VOLUME" >/dev/null 2>&1 || true
-        ! docker volume inspect "$VOLUME" >/dev/null 2>&1 \
-            || die "could not remove volume $VOLUME to rebind it to $LOOP_MNT — check what still uses it (docker ps -a --filter volume=$VOLUME)"
-        docker volume create --driver local --opt type=none --opt o=bind \
-            --opt device="$LOOP_MNT" "$VOLUME" >/dev/null
-    fi
+if [[ -n $BUILDER_TMPFS_GB ]]; then
+    # GC runs after a build, so the cache must leave the tmpfs room for the
+    # next build's own layers: past the tmpfs size a build gets ENOSPC.
+    CACHE_GB=$(( BUILDER_TMPFS_GB * 6 / 10 ))
+    MIN_FREE_GB=$(( BUILDER_TMPFS_GB / 4 ))
+    echo "install-tenant-builder: BUILDER_TMPFS_GB=${BUILDER_TMPFS_GB}G sets CACHE_GB=$CACHE_GB MIN_FREE_GB=$MIN_FREE_GB" >&2
 else
-    docker volume create "$VOLUME" >/dev/null
-fi
+    free_gb=$(df --output=avail -BG /var/lib 2>/dev/null | tail -1 | tr -dc '0-9')
+    free_gb=${free_gb:-0}
+    if [[ -z $BUILDER_DISK_GB ]]; then
+        BUILDER_DISK_GB=$(( free_gb / 4 ))
+        [[ $BUILDER_DISK_GB -gt 50 ]] && BUILDER_DISK_GB=50
+        [[ $BUILDER_DISK_GB -ge 15 ]] \
+            || die "only ${free_gb}G free under /var/lib — too little for a 15G+ builder disk; free space, or set BUILDER_DISK_GB explicitly (0 disables the cap)"
+    fi
 
-# A cache on the filesystem Postgres and every container write to lets one
-# tenant build fill it. With BUILDER_DISK_GB=0 this only warns — the
-# fixed-size loop fs above (default on) is what actually bounds it.
-cache_dir=$(docker volume inspect --format '{{index .Options "device"}}' "$VOLUME")
-docker_root=$(docker info --format '{{.DockerRootDir}}')
-cache_dev=$(stat -c %d "${cache_dir:-$docker_root}")
-if [[ $cache_dev == "$(stat -c %d /)" || $cache_dev == "$(stat -c %d "$docker_root")" ]]; then
-    echo "install-tenant-builder: WARNING: the build cache (${cache_dir:-volume $VOLUME in $docker_root}) shares a filesystem with the host root or Docker's data — a tenant build can fill it (a .NET SDK build peaked above 11.5 GB). Give it its own: docs/runbooks/gvisor.md \"Builder disk\"." >&2
+    if [[ $BUILDER_DISK_GB -gt 0 ]]; then
+        # Cache caps must leave room inside the loop fs, not just below
+        # buildkitd's percentage-of-disk defaults.
+        if (( CACHE_GB + MIN_FREE_GB > BUILDER_DISK_GB )); then
+            MIN_FREE_GB=$(( BUILDER_DISK_GB / 5 ))
+            [[ $MIN_FREE_GB -lt 1 ]] && MIN_FREE_GB=1
+            CACHE_GB=$(( BUILDER_DISK_GB / 2 ))
+            [[ $CACHE_GB -lt 2 ]] && CACHE_GB=2
+            echo "install-tenant-builder: CACHE_GB/MIN_FREE_GB didn't fit BUILDER_DISK_GB=${BUILDER_DISK_GB}G — clamped to CACHE_GB=$CACHE_GB MIN_FREE_GB=$MIN_FREE_GB" >&2
+        fi
+
+        # Idempotent: an existing image/mount from a previous run is reused as-is
+        # (no resize) so a re-run doesn't lose the cache or need a bigger disk.
+        if [[ ! -f $LOOP_IMG ]]; then
+            # fallocate reserves the whole size now, so keep 10G of headroom.
+            (( free_gb >= BUILDER_DISK_GB + 10 )) \
+                || die "BUILDER_DISK_GB=${BUILDER_DISK_GB}G needs ${BUILDER_DISK_GB}G + 10G headroom, only ${free_gb}G free under /var/lib"
+            fallocate -l "${BUILDER_DISK_GB}G" "$LOOP_IMG"
+            mkfs.ext4 -q "$LOOP_IMG"
+        fi
+        mkdir -p "$LOOP_MNT"
+        grep -qF "$LOOP_IMG" /etc/fstab \
+            || echo "$LOOP_IMG $LOOP_MNT ext4 loop,nofail 0 0" >> /etc/fstab
+        mountpoint -q "$LOOP_MNT" || mount "$LOOP_MNT"
+        mountpoint -q "$LOOP_MNT" || die "$LOOP_MNT did not mount — check /etc/fstab and $LOOP_IMG"
+
+        if ! device=$(docker volume inspect --format '{{index .Options "device"}}' "$VOLUME" 2>/dev/null) \
+            || [[ $device != "$LOOP_MNT" ]]; then
+            # The old builder holds the volume; it is recreated below anyway.
+            docker rm -f "$NAME" >/dev/null 2>&1 || true
+            docker volume rm "$VOLUME" >/dev/null 2>&1 || true
+            ! docker volume inspect "$VOLUME" >/dev/null 2>&1 \
+                || die "could not remove volume $VOLUME to rebind it to $LOOP_MNT — check what still uses it (docker ps -a --filter volume=$VOLUME)"
+            docker volume create --driver local --opt type=none --opt o=bind \
+                --opt device="$LOOP_MNT" "$VOLUME" >/dev/null
+        fi
+    else
+        docker volume create "$VOLUME" >/dev/null
+    fi
+
+    # A cache on the filesystem Postgres and every container write to lets one
+    # tenant build fill it. With BUILDER_DISK_GB=0 this only warns — the
+    # fixed-size loop fs above (default on) is what actually bounds it.
+    cache_dir=$(docker volume inspect --format '{{index .Options "device"}}' "$VOLUME")
+    docker_root=$(docker info --format '{{.DockerRootDir}}')
+    cache_dev=$(stat -c %d "${cache_dir:-$docker_root}")
+    if [[ $cache_dev == "$(stat -c %d /)" || $cache_dev == "$(stat -c %d "$docker_root")" ]]; then
+        echo "install-tenant-builder: WARNING: the build cache (${cache_dir:-volume $VOLUME in $docker_root}) shares a filesystem with the host root or Docker's data — a tenant build can fill it (a .NET SDK build peaked above 11.5 GB). Give it its own: docs/runbooks/gvisor.md \"Builder disk\"." >&2
+    fi
 fi
 
 # ICC off: nothing else belongs on this network, and a build must not reach
@@ -135,22 +157,34 @@ printf 'nameserver %s\n' $NAMESERVERS > "$resolv"
 # No --allow-insecure-entitlement: buildkitd itself then refuses
 # RUN --network=host / --security=insecure from any client. Capabilities are
 # the sandbox's own under gVisor, not the host's.
-# Native snapshotter: buildkitd would pick overlayfs, but gVisor has no
-# trusted.*/user.overlay.* xattrs, so any base image with an opaque whiteout
-# (e.g. mcr.microsoft.com/dotnet/*) fails with "failed to convert whiteout
-# file ... operation not supported". Native copies each step's parent
-# instead: far more disk mid-build (CACHE_GB above).
+# Native snapshotter on the disk cache: buildkitd would pick overlayfs, but
+# gVisor has no trusted.*/user.overlay.* xattrs on a host mount, so any base
+# image with an opaque whiteout (e.g. mcr.microsoft.com/dotnet/*) fails with
+# "failed to convert whiteout file ... operation not supported". Native copies
+# each step's parent instead: far more disk mid-build (CACHE_GB above), and
+# slow, since every byte crosses the sandbox boundary. gVisor's own tmpfs
+# (BUILDER_TMPFS_GB) has those xattrs, so overlayfs works there.
 docker rm -f "$NAME" >/dev/null 2>&1 || true
-# A builder from before the native snapshotter kept its cache in
-# runc-overlayfs/, which the native worker (runc-native/) never collects.
-docker run --rm -v "$VOLUME:/cache" --entrypoint rm "$IMAGE" -rf /cache/runc-overlayfs
+if [[ -n $BUILDER_TMPFS_GB ]]; then
+    # exec: the default tmpfs is noexec, and every RUN step executes from it.
+    cache_mount=(--tmpfs "/var/lib/buildkit:exec,size=${BUILDER_TMPFS_GB}g")
+    snapshotter=overlayfs
+    mem=$(( ${MEMORY%g} + BUILDER_TMPFS_GB ))g
+else
+    # A builder from before the native snapshotter kept its cache in
+    # runc-overlayfs/, which the native worker (runc-native/) never collects.
+    docker run --rm -v "$VOLUME:/cache" --entrypoint rm "$IMAGE" -rf /cache/runc-overlayfs
+    cache_mount=(-v "$VOLUME:/var/lib/buildkit")
+    snapshotter=native
+    mem=$MEMORY
+fi
 docker run -d --name "$NAME" \
     --runtime runsc-netstack --cap-add ALL \
     --restart unless-stopped \
     --network "$NETWORK" -v "$resolv:/etc/resolv.conf:ro" \
-    --cpus "$CPUS" --memory "$MEMORY" --memory-swap "$MEMORY" --pids-limit "$PIDS" \
-    -v "$VOLUME:/var/lib/buildkit" \
-    "$IMAGE" --oci-max-parallelism "$MAX_PARALLELISM" --oci-worker-snapshotter=native \
+    --cpus "$CPUS" --memory "$mem" --memory-swap "$mem" --pids-limit "$PIDS" \
+    "${cache_mount[@]}" \
+    "$IMAGE" --oci-max-parallelism "$MAX_PARALLELISM" --oci-worker-snapshotter="$snapshotter" \
     --oci-worker-gc-keepstorage "2000,$((MIN_FREE_GB * 1000)),$((CACHE_GB * 1000))" >/dev/null
 
 for _ in $(seq 1 30); do
@@ -165,5 +199,6 @@ dmesg=$(docker exec "$NAME" dmesg 2>/dev/null) || dmesg="(no dmesg in $IMAGE; ru
 echo "${dmesg%%$'\n'*}"
 disk_desc="cache in a plain volume, no size cap (BUILDER_DISK_GB=0)"
 [[ $BUILDER_DISK_GB -gt 0 ]] && disk_desc="cache on a ${BUILDER_DISK_GB}G loop fs at $LOOP_MNT"
+[[ -n $BUILDER_TMPFS_GB ]] && disk_desc="cache in a ${BUILDER_TMPFS_GB}G in-sandbox tmpfs (RAM, emptied on restart; memory cap $mem)"
 echo "install-tenant-builder: $NAME ready (runtime $runtime, $CPUS CPUs, $MEMORY, max $MAX_PARALLELISM parallel steps, cache ≤ ${CACHE_GB} GB, GC below ${MIN_FREE_GB} GB free, $disk_desc)"
 echo "Enable: echo 'TENANT_BUILDKIT=$NAME' >> /opt/forge/.env && cd /opt/forge && docker compose up -d app"
