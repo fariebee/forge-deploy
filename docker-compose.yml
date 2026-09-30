@@ -176,6 +176,7 @@ services:
       # cluster failover/unreachable/replication_error). Empty (default) is
       # email-only, exactly today's behaviour — see docs/runbooks/pagerduty.md.
       PAGERDUTY_ROUTING_KEY: ${PAGERDUTY_ROUTING_KEY:-}
+      ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-}
       # Distinguishes this node's egress boundary PagerDuty alerts from its
       # cluster siblings (the egress loop runs on every node). Empty falls
       # back to EffectiveClusterRole (primary/standby) — set per node on an
