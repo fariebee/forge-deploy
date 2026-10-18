@@ -3,7 +3,19 @@ set -e
 
 PROVIDER="${DNS_PROVIDER:-godaddy}"
 
-if [ "$PROVIDER" = "cloudflare" ] && [ -n "$CLOUDFLARE_API_TOKEN" ]; then
+# Local dev (DOMAIN=localhost or *.localhost): no public CA can issue for
+# these names, so certs come from Caddy's internal CA (local_certs below)
+# instead of the DNS-01 issuer the token would otherwise select. Per-host
+# on_demand rather than a wildcard: browsers and curl refuse a second-level
+# wildcard such as *.localhost. Prod never runs with such a DOMAIN, so this
+# branch leaves real installs untouched.
+case "$DOMAIN" in
+    localhost|*.localhost) LOCAL_CERTS=1 ;;
+    *) LOCAL_CERTS= ;;
+esac
+if [ -n "$LOCAL_CERTS" ]; then
+    TLS_BLOCK="on_demand"
+elif [ "$PROVIDER" = "cloudflare" ] && [ -n "$CLOUDFLARE_API_TOKEN" ]; then
     TLS_BLOCK="dns cloudflare $CLOUDFLARE_API_TOKEN"
 elif [ -n "$GODADDY_API_TOKEN" ]; then
     TLS_BLOCK="dns godaddy $GODADDY_API_TOKEN"
@@ -20,6 +32,9 @@ fi
 # so a token containing one can't corrupt the rendered Caddyfile.
 TLS_BLOCK_ESC=$(printf '%s' "$TLS_BLOCK" | sed 's/[\\&|]/\\&/g')
 sed "s|##DNS_BLOCK##|$TLS_BLOCK_ESC|" /etc/caddy/Caddyfile > /tmp/Caddyfile
+if [ -n "$LOCAL_CERTS" ]; then
+    awk 'NR==1 && /^\{/ { print; print "\tlocal_certs"; next } { print }' /tmp/Caddyfile > /tmp/Caddyfile.tmp && mv /tmp/Caddyfile.tmp /tmp/Caddyfile
+fi
 
 # Without a tenant apex, drop its site block: `*.` alone is not a valid site
 # address. Keep in sync with caddy.Generate (backend/internal/service/caddy).
