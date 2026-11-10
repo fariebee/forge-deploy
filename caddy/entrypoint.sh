@@ -19,6 +19,7 @@ elif [ "$PROVIDER" = "cloudflare" ] && [ -n "$CLOUDFLARE_API_TOKEN" ]; then
     TLS_BLOCK="dns cloudflare $CLOUDFLARE_API_TOKEN"
 elif [ -n "$GODADDY_API_TOKEN" ]; then
     TLS_BLOCK="dns godaddy $GODADDY_API_TOKEN"
+    GODADDY_DELAY=1
 else
     # No DNS provider token: DNS-01 is unavailable, so a wildcard cert for
     # *.{$DOMAIN} cannot be issued. Fall back to on-demand HTTP-01, which
@@ -32,6 +33,13 @@ fi
 # so a token containing one can't corrupt the rendered Caddyfile.
 TLS_BLOCK_ESC=$(printf '%s' "$TLS_BLOCK" | sed 's/[\\&|]/\\&/g')
 sed "s|##DNS_BLOCK##|$TLS_BLOCK_ESC|" /etc/caddy/Caddyfile > /tmp/Caddyfile
+# GoDaddy's nameservers lag each other and its zones have a 600s negative-cache
+# TTL: if Let's Encrypt validates before both serve the TXT record, it caches
+# "no record" for 10 minutes and every retry in that window fails. Wait first.
+# Keep in sync with caddy.Generate (backend/internal/service/caddy).
+if [ -n "$GODADDY_DELAY" ]; then
+    awk '{ print } match($0, /^[ \t]*dns godaddy /) { ws = $0; sub(/dns godaddy .*/, "", ws); print ws "propagation_delay 60s" }' /tmp/Caddyfile > /tmp/Caddyfile.tmp && mv /tmp/Caddyfile.tmp /tmp/Caddyfile
+fi
 if [ -n "$LOCAL_CERTS" ]; then
     awk 'NR==1 && /^\{/ { print; print "\tlocal_certs"; next } { print }' /tmp/Caddyfile > /tmp/Caddyfile.tmp && mv /tmp/Caddyfile.tmp /tmp/Caddyfile
 fi
