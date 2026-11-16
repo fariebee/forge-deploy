@@ -166,6 +166,8 @@ services:
       TENANT_BUILD_CACHE: ${TENANT_BUILD_CACHE:-}
       # Global cap on concurrent docker builds (one per org is always enforced).
       BUILD_MAX_CONCURRENT: ${BUILD_MAX_CONCURRENT:-2}
+      # GB cap on the host daemon's build cache, pruned after builds. 0 = off.
+      BUILD_CACHE_MAX_GB: ${BUILD_CACHE_MAX_GB:-0}
       # How long a stop/restart (every release) waits for in-flight app
       # deploys before exiting. 0 (default) = don't wait; 25m is recommended
       # on hosts that take tenant builds, with FORGE_STOP_GRACE_PERIOD=30m.
